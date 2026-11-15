@@ -130,8 +130,13 @@ def test_makedirs_secure_refuses_symlinked_component(tmp_path):
     parent.mkdir()
     (parent / "folder").symlink_to(leak)
 
-    with pytest.raises(_safe_fs.UnsafeExportPathError):
-        _safe_fs.makedirs_secure(parent / "folder" / "nested")
+    fd = None
+    try:
+        with pytest.raises(_safe_fs.UnsafeExportPathError):
+            fd = _safe_fs.makedirs_secure(parent / "folder" / "nested")
+    finally:
+        if fd is not None:
+            os.close(fd)
 
     assert list(leak.iterdir()) == []
 
@@ -214,8 +219,13 @@ def test_makedirs_secure_refuses_symlink_that_wins_create_race(tmp_path, monkeyp
     monkeypatch.setattr(os, "open", miss_child_once)
     monkeypatch.setattr(os, "mkdir", plant_symlink)
 
-    with pytest.raises(_safe_fs.UnsafeExportPathError):
-        _safe_fs.makedirs_secure(child)
+    fd = None
+    try:
+        with pytest.raises(_safe_fs.UnsafeExportPathError):
+            fd = _safe_fs.makedirs_secure(child)
+    finally:
+        if fd is not None:
+            os.close(fd)
 
     assert child.is_symlink()
     assert list(leak.iterdir()) == []
