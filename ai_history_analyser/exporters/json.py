@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, Any
 
 from .base import BaseExporter
+from ..fileutils import open_regular_for_write
 from ..models import AnalysisResult
 
 
@@ -50,7 +51,7 @@ class JSONExporter(BaseExporter):
         }
         
         # Write JSON
-        with open(output_file, 'w', encoding='utf-8') as f:
+        with open_regular_for_write(output_file, encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
         
         return output_file

@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Dict, Any
 
 from .base import BaseExporter
+from ..fileutils import open_regular_for_write
 from ..models import AnalysisResult, UnfinishedProject
 
 
@@ -41,7 +42,7 @@ class ObsidianExporter(BaseExporter):
         """Create the main index file"""
         index_path = output_dir / "Unfinished Projects Index.md"
         
-        with open(index_path, 'w', encoding='utf-8') as f:
+        with open_regular_for_write(index_path, encoding='utf-8') as f:
             f.write("# Unfinished Projects Index\n\n")
             f.write(f"*Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n\n")
             f.write(f"**Platform:** {result.platform.value.title()}\n")
@@ -87,7 +88,7 @@ class ObsidianExporter(BaseExporter):
         filename = self._get_project_filename(project)
         file_path = output_dir / f"{filename}.md"
         
-        with open(file_path, 'w', encoding='utf-8') as f:
+        with open_regular_for_write(file_path, encoding='utf-8') as f:
             f.write(f"# {project.title}\n\n")
             
             # Metadata

@@ -1,8 +1,6 @@
 """Command-line interface for AI History Analyser"""
 
-import errno
 import os
-import stat
 import click
 import yaml
 from pathlib import Path
@@ -12,45 +10,11 @@ from tqdm import tqdm
 from .parsers import get_parser
 from .analyzers import get_analyzer
 from .exporters import get_exporter
+from .fileutils import open_regular_file, open_regular_for_write
 from .models import Conversation, Platform
 
 
 MAX_CONFIG_BYTES = 1024 * 1024
-
-
-class NotRegularFileError(OSError):
-    """Raised when a config path does not resolve to a regular file"""
-
-
-def _open_regular_file(path: Path, flags: int, follow_symlinks: bool = True) -> int:
-    """Open ``path`` without blocking and return the fd only if it is a regular file.
-
-    The type check is made on the opened descriptor, so a FIFO, device or
-    directory swapped in at ``path`` is rejected instead of being read.
-    """
-    nonblock = getattr(os, 'O_NONBLOCK', 0)
-    flags |= nonblock | getattr(os, 'O_NOCTTY', 0) | getattr(os, 'O_CLOEXEC', 0)
-    if not follow_symlinks:
-        flags |= getattr(os, 'O_NOFOLLOW', 0)
-
-    try:
-        fd = os.open(path, flags, 0o666)
-    except OSError as e:
-        if e.errno == errno.ELOOP and not follow_symlinks:
-            raise NotRegularFileError(f"{path} is a symlink") from e
-        if e.errno == errno.ENXIO:
-            raise NotRegularFileError(f"{path} is not a regular file") from e
-        raise
-
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise NotRegularFileError(f"{path} is not a regular file")
-        if nonblock:
-            os.set_blocking(fd, True)
-    except BaseException:
-        os.close(fd)
-        raise
-    return fd
 
 
 def load_config(config_path: Path = None) -> dict:
@@ -60,7 +24,7 @@ def load_config(config_path: Path = None) -> dict:
         config_path = Path.cwd() / "config.yaml"
 
     try:
-        fd = _open_regular_file(config_path, os.O_RDONLY, follow_symlinks=not implicit)
+        fd = open_regular_file(config_path, os.O_RDONLY, follow_symlinks=not implicit)
     except FileNotFoundError:
         if not implicit:
             click.echo(f"Warning: Config file not found, ignoring: {config_path}", err=True)
@@ -306,13 +270,12 @@ def init_config(output):
     }
     
     try:
-        fd = _open_regular_file(output, os.O_WRONLY | os.O_CREAT)
+        f = open_regular_for_write(output)
     except OSError as e:
         click.echo(f"Error: Cannot write config file {output}: {e}", err=True)
         return
 
-    with os.fdopen(fd, 'w') as f:
-        f.truncate()
+    with f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
     
     click.echo(f"Created configuration file: {output}")
