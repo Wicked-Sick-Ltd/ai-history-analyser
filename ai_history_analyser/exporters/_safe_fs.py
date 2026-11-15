@@ -16,6 +16,7 @@ is refused rather than followed.
 """
 
 import os
+import stat
 from pathlib import Path
 
 __all__ = [
@@ -71,23 +72,26 @@ def open_dir_secure(path):
 def makedirs_secure(path):
     """Create ``path`` and any missing parents, refusing symlink components.
 
-    Each level is created if absent and then reopened with ``O_NOFOLLOW``, so a
-    component swapped to a symlink in the moment between creation and reopen is
-    refused instead of followed. Returns a descriptor bound to the final
-    directory's inode; the caller must ``os.close`` it.
+    Each missing level is created with ``mkdir`` relative to the bound parent
+    descriptor and then reopened with ``O_NOFOLLOW``. A parent replaced by a
+    symlink cannot receive the new directory, and a component swapped to a
+    symlink between creation and reopen is refused instead of followed. Returns
+    a descriptor bound to the final directory's inode; the caller must
+    ``os.close`` it.
     """
     parts = _absolute_parts(path)
     fd = os.open(parts[0], os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    cumulative = Path(parts[0])
     try:
         for part in parts[1:]:
-            cumulative = cumulative / part
             try:
                 child = os.open(part, _DIR_OPEN_FLAGS, dir_fd=fd)
             except FileNotFoundError:
                 try:
-                    os.mkdir(str(cumulative))
+                    os.mkdir(part, dir_fd=fd)
                 except FileExistsError:
+                    # Expected race: another writer created this component
+                    # between the open and mkdir. The O_NOFOLLOW reopen below
+                    # refuses that winner when it is a symlink.
                     pass
                 try:
                     child = os.open(part, _DIR_OPEN_FLAGS, dir_fd=fd)
@@ -114,8 +118,6 @@ def _is_symlink_at(dir_fd, name):
         mode = os.lstat(name, dir_fd=dir_fd).st_mode
     except OSError:
         return False
-    import stat
-
     return stat.S_ISLNK(mode)
 
 
@@ -132,19 +134,19 @@ def open_write_relative(dir_fd, name, encoding="utf-8"):
 def open_write_file_secure(path, encoding="utf-8"):
     """Open a file for writing after verifying its parent has no symlink.
 
-    The final component is opened with ``O_NOFOLLOW``, so a name swapped to a
-    symlink just before the write is refused rather than followed.
+    The parent is bound with ``open_dir_secure`` and the final component is
+    opened relative to that descriptor with ``O_NOFOLLOW``. A parent swapped to
+    a symlink after the check cannot redirect the write, and a name swapped to
+    a symlink just before the write is refused rather than followed.
     """
     path = Path(path)
-    parent = path.parent
-    parent_fd = open_dir_secure(parent)
+    name = path.name
+    parent_fd = open_dir_secure(path.parent)
     try:
-        fd = os.open(str(path), _FILE_WRITE_FLAGS, 0o644)
+        fd = os.open(name, _FILE_WRITE_FLAGS, 0o644, dir_fd=parent_fd)
     except OSError as exc:
-        if exc.errno == getattr(os, "ELOOP", None) or path.is_symlink():
-            raise UnsafeExportPathError(
-                f"refusing to write through symlinked path {path}"
-            ) from exc
+        if exc.errno == getattr(os, "ELOOP", None) or _is_symlink_at(parent_fd, name):
+            raise UnsafeExportPathError(f"refusing to write through symlinked path {path}") from exc
         raise
     finally:
         os.close(parent_fd)
