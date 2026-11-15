@@ -14,9 +14,20 @@ class ObsidianExporter(BaseExporter):
     def get_name(self) -> str:
         return "obsidian"
     
+    def validate_config(self, config: dict) -> dict:
+        """Check the folder setting and return a normalized copy"""
+        config = super().validate_config(config)
+        if 'folder' in config:
+            folder = config['folder']
+            if not isinstance(folder, str):
+                raise ValueError("folder must be a string")
+            if '\x00' in folder:
+                raise ValueError("folder must not contain a null character")
+        return config
+
     def export(self, result: AnalysisResult, output_path: Path, config: dict = None) -> Path:
         """Export to Obsidian format"""
-        config = config or {}
+        config = self.validate_config(config if config is not None else {})
         
         # Determine output directory
         if output_path.is_dir():

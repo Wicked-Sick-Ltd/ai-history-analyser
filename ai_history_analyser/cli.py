@@ -12,16 +12,79 @@ from .exporters import get_exporter
 from .models import Conversation, Platform
 
 
+class ConfigError(click.ClickException):
+    """Raised when the configuration file cannot be used"""
+
+
 def load_config(config_path: Path = None) -> dict:
     """Load configuration from file"""
-    if config_path is None:
+    explicit = config_path is not None
+    if not explicit:
         config_path = Path.cwd() / "config.yaml"
     
-    if not config_path.exists():
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f)
+    except FileNotFoundError:
+        if explicit:
+            raise ConfigError(f"Configuration file not found: {config_path}")
         return {}
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
+        raise ConfigError(f"Invalid configuration file {config_path}: {e}")
+
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ConfigError(
+            f"Invalid configuration file {config_path}: expected a mapping of settings, "
+            f"not {type(data).__name__}"
+        )
+    return data
+
+
+def _config_section(mapping: dict, key: str, name: str) -> dict:
+    """Return mapping[key] as a mapping, treating a missing or null value as empty"""
+    value = mapping.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError(f"Invalid configuration: '{name}' must be a mapping, not {type(value).__name__}")
+    return value
+
+
+def resolve_settings(config_data: dict, analyzer_name: str, analyzer_instance,
+                     exporter_name: str, exporter_instance=None) -> Tuple[dict, dict]:
+    """Validate loaded configuration and return (analyzer_config, exporter_config)"""
+    analysis = _config_section(config_data, 'analysis', 'analysis')
+    exporters = _config_section(config_data, 'exporters', 'exporters')
+    obsidian = _config_section(config_data, 'obsidian', 'obsidian')
+
+    analyzer_config = _config_section(analysis, analyzer_name, f"analysis.{analyzer_name}")
+    try:
+        analyzer_config = analyzer_instance.validate_config(analyzer_config)
+    except ValueError as e:
+        raise ConfigError(f"Invalid configuration for 'analysis.{analyzer_name}': {e}")
+
+    exporter_config = {}
+    if exporter_instance is not None:
+        exporter_config = dict(_config_section(exporters, exporter_name, f"exporters.{exporter_name}"))
+        if exporter_name == 'obsidian':
+            exporter_config.update(obsidian)
+        try:
+            exporter_config = exporter_instance.validate_config(exporter_config)
+        except ValueError as e:
+            raise ConfigError(f"Invalid configuration for exporter '{exporter_name}': {e}")
     
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f) or {}
+    return analyzer_config, exporter_config
+
+
+def _fail(message: str, verbose: bool = False):
+    """Report an error and exit with a non-zero status"""
+    click.echo(message, err=True)
+    if verbose:
+        import traceback
+        traceback.print_exc()
+    click.get_current_context().exit(1)
 
 
 @click.group()
@@ -65,8 +128,17 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
     
     # Validate inputs
     if len(input_files) != len(platforms):
-        click.echo("Error: Number of input files must match number of platforms", err=True)
-        return
+        _fail("Error: Number of input files must match number of platforms")
+
+    try:
+        analyzer_instance = get_analyzer(analyzer)
+        exporter_instance = get_exporter(exporter) if output else None
+    except ValueError as e:
+        _fail(f"Error: {e}")
+
+    analyzer_config, exporter_config = resolve_settings(
+        config_data, analyzer, analyzer_instance, exporter, exporter_instance
+    )
     
     # Parse all conversations
     all_conversations = []
@@ -87,45 +159,30 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
             continue
     
     if not all_conversations:
-        click.echo("No conversations found to analyze", err=True)
-        return
+        _fail("No conversations found to analyze")
     
     click.echo(f"\nAnalyzing {len(all_conversations)} conversations...")
     
     # Run analysis
-    analyzer_config = config_data.get('analysis', {}).get(analyzer, {})
-    analyzer_instance = get_analyzer(analyzer)
-    
     try:
         result = analyzer_instance.analyze(all_conversations, analyzer_config)
-        click.echo(f"Found {len(result.unfinished_projects)} unfinished projects")
     except Exception as e:
-        click.echo(f"Error during analysis: {e}", err=True)
-        if verbose:
-            import traceback
-            traceback.print_exc()
-        return
+        _fail(f"Error during analysis: {e}", verbose)
+    click.echo(f"Found {len(result.unfinished_projects)} unfinished projects")
     
     # Export results
     if output:
         click.echo(f"\nExporting results to {output}...")
         
-        exporter_config = config_data.get('exporters', {}).get(exporter, {})
-        if exporter == 'obsidian':
-            exporter_config.update(config_data.get('obsidian', {}))
-            if not output.exists() or not output.is_dir():
-                click.echo(f"Warning: Obsidian path should be a directory. Creating: {output}")
-                output.mkdir(parents=True, exist_ok=True)
-        
         try:
-            exporter_instance = get_exporter(exporter)
+            if exporter == 'obsidian':
+                if not output.exists() or not output.is_dir():
+                    click.echo(f"Warning: Obsidian path should be a directory. Creating: {output}")
+                    output.mkdir(parents=True, exist_ok=True)
             output_path = exporter_instance.export(result, output, exporter_config)
-            click.echo(f"✓ Exported to {output_path}")
         except Exception as e:
-            click.echo(f"Error during export: {e}", err=True)
-            if verbose:
-                import traceback
-                traceback.print_exc()
+            _fail(f"Error during export: {e}", verbose)
+        click.echo(f"✓ Exported to {output_path}")
     else:
         # Print summary
         click.echo("\n=== Analysis Summary ===")

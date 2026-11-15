@@ -1,5 +1,6 @@
 """Analyzer for detecting unfinished projects"""
 
+import math
 import re
 from typing import List, Dict, Any
 from datetime import datetime
@@ -54,9 +55,39 @@ class UnfinishedProjectsAnalyzer(BaseAnalyzer):
     def get_name(self) -> str:
         return "unfinished_projects"
     
+    def validate_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Check keywords and min_confidence and return a normalized copy"""
+        config = super().validate_config(config)
+
+        if 'keywords' in config:
+            keywords = config['keywords']
+            if not isinstance(keywords, list) or not all(isinstance(k, str) for k in keywords):
+                raise ValueError("keywords must be a list of strings")
+            for pattern in keywords:
+                try:
+                    re.compile(pattern, re.IGNORECASE)
+                except (re.error, OverflowError, RecursionError) as e:
+                    shown = pattern if len(pattern) <= 80 else pattern[:80] + '...'
+                    raise ValueError(f"invalid keyword pattern {shown!r}: {e}") from None
+            config['keywords'] = list(keywords)
+
+        if 'min_confidence' in config:
+            min_confidence = config['min_confidence']
+            if isinstance(min_confidence, bool) or not isinstance(min_confidence, (int, float)):
+                raise ValueError("min_confidence must be a number")
+            try:
+                min_confidence = float(min_confidence)
+            except OverflowError:
+                raise ValueError("min_confidence must be a finite number") from None
+            if not math.isfinite(min_confidence):
+                raise ValueError("min_confidence must be a finite number")
+            config['min_confidence'] = min_confidence
+
+        return config
+
     def analyze(self, conversations: List[Conversation], config: Dict[str, Any] = None) -> AnalysisResult:
         """Analyze conversations for unfinished projects"""
-        config = config or {}
+        config = self.validate_config(config if config is not None else {})
         
         # Override settings from config
         if 'keywords' in config:
