@@ -1,5 +1,7 @@
 """Command-line interface for AI History Analyser"""
 
+import os
+
 import click
 import yaml
 from pathlib import Path
@@ -9,6 +11,7 @@ from tqdm import tqdm
 from .parsers import get_parser
 from .analyzers import get_analyzer
 from .exporters import get_exporter
+from .exporters import _safe_fs
 from .models import Conversation, Platform
 
 
@@ -115,7 +118,11 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
             exporter_config.update(config_data.get('obsidian', {}))
             if not output.exists() or not output.is_dir():
                 click.echo(f"Warning: Obsidian path should be a directory. Creating: {output}")
-                output.mkdir(parents=True, exist_ok=True)
+                try:
+                    os.close(_safe_fs.makedirs_secure(output))
+                except OSError as e:
+                    click.echo(f"Error during export: {e}", err=True)
+                    return
         
         try:
             exporter_instance = get_exporter(exporter)
