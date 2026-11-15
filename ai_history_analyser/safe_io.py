@@ -13,6 +13,7 @@ redirect the write.
 import os
 import secrets
 import stat
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional, TextIO, Union
@@ -26,6 +27,10 @@ _USE_DIR_FD = os.open in os.supports_dir_fd and bool(_O_DIRECTORY)
 
 _TEMP_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC | _O_BINARY
 _DIR_FLAGS = os.O_RDONLY | _O_DIRECTORY | _O_CLOEXEC
+
+# Bytes in ".{prefix}.{token}.tmp" aside from prefix. token_hex(8) is 16 hex digits.
+_TEMP_AFFIX_BYTES = len(".") + len(".") + 16 + len(".tmp")
+_FALLBACK_NAME_MAX = 255
 
 
 class UnsafeOutputPath(OSError):
@@ -43,6 +48,32 @@ def _check_name(name: str, *, allow_parent: bool = False) -> None:
         raise ValueError(f"invalid output name: {name!r}")
 
 
+def _clip_filename(name: str, max_bytes: int) -> str:
+    """Return a prefix of ``name`` at most ``max_bytes`` long on disk.
+
+    Slicing a ``str`` counts code points. A destination that fits in NAME_MAX
+    can still overflow it once the temporary affix is added, so the cut is on
+    the encoded bytes and stops before a partial character.
+    """
+    if max_bytes <= 0:
+        return ""
+    raw = os.fsencode(name)
+    if len(raw) <= max_bytes:
+        return name
+    encoding = sys.getfilesystemencoding()
+    end = max_bytes
+    while end > 0:
+        try:
+            text = raw[:end].decode(encoding)
+        except UnicodeDecodeError:
+            end -= 1
+            continue
+        if len(os.fsencode(text)) <= max_bytes:
+            return text
+        end -= 1
+    return ""
+
+
 class OutputDir:
     """A destination directory bound once; files are written relative to it.
 
@@ -51,7 +82,7 @@ class OutputDir:
     are never followed if they are symlinks.
     """
 
-    def __init__(self, path: Union[str, Path], *, _fd: Optional[int] = None):
+    def __init__(self, path: Union[str, Path], _fd: Optional[int] = None):
         self.path = Path(path)
         if _fd is not None:
             self._fd: Optional[int] = _fd
@@ -85,6 +116,9 @@ class OutputDir:
             try:
                 os.mkdir(self._entry(name), 0o777, dir_fd=self._fd)
             except FileExistsError:
+                # Expected when the directory already exists. The open below
+                # still validates that entry, including the non-symlink check
+                # when _USE_DIR_FD is enabled.
                 pass
         if not _USE_DIR_FD:
             return OutputDir(self.path / name)
@@ -98,7 +132,13 @@ class OutputDir:
                 "refusing to use an output folder that is a symlink or not a directory",
                 str(self.path / name),
             ) from e
-        return OutputDir(self.path / name, _fd=fd)
+        try:
+            # fd is handed to the child, which closes it. Close it here only
+            # when that hand-off fails so a raised constructor cannot leak it.
+            return OutputDir(self.path / name, fd)
+        except BaseException:
+            os.close(fd)
+            raise
 
     def _restrict_mode_to_existing(self, fd: int, name: str) -> None:
         # Only ever removes permission bits, so a racing swap of the entry
@@ -114,9 +154,23 @@ class OutputDir:
         if restricted != current:
             os.chmod(fd, restricted)
 
+    def _name_max_bytes(self) -> int:
+        """Maximum directory-entry name length in bytes, or 255 if unknown."""
+        try:
+            if self._fd is not None:
+                limit = os.fpathconf(self._fd, "PC_NAME_MAX")
+            else:
+                limit = os.pathconf(self.path, "PC_NAME_MAX")
+        except (AttributeError, OSError, ValueError):
+            return _FALLBACK_NAME_MAX
+        if isinstance(limit, int) and limit > 0:
+            return limit
+        return _FALLBACK_NAME_MAX
+
     def _create_temp(self, name: str):
+        prefix = _clip_filename(name, self._name_max_bytes() - _TEMP_AFFIX_BYTES)
         for _ in range(100):
-            tmp = f".{name[:100]}.{secrets.token_hex(8)}.tmp"
+            tmp = f".{prefix}.{secrets.token_hex(8)}.tmp"
             try:
                 fd = os.open(self._entry(tmp), _TEMP_FLAGS, 0o666, dir_fd=self._fd)
             except FileExistsError:
@@ -144,6 +198,8 @@ class OutputDir:
             try:
                 os.unlink(self._entry(tmp), dir_fd=self._fd)
             except OSError:
+                # Best-effort unlink. Ignore failure so it cannot mask the
+                # original exception re-raised below.
                 pass
             raise
 
