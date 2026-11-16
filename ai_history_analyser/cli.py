@@ -7,7 +7,7 @@ import sys
 import click
 import yaml
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Optional
 from tqdm import tqdm
 
 from .parsers import get_parser
