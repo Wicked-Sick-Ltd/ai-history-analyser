@@ -1,5 +1,6 @@
 """Command-line interface for AI History Analyser"""
 
+import math
 import sys
 
 import click
@@ -24,6 +25,13 @@ def load_config(config_path: Path = None) -> dict:
     
     with open(config_path, 'r') as f:
         return yaml.safe_load(f) or {}
+
+
+def _unit_interval(ctx, param, value):
+    """Scores lie in 0..1, and a NaN or infinite threshold would silently match nothing."""
+    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        raise click.BadParameter("must be a finite number between 0 and 1")
+    return value
 
 
 @click.group()
@@ -149,8 +157,8 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
               help='Input file(s) to analyze')
 @click.option('--platform', '-p', 'platforms', multiple=True, required=True,
               help='Platform for each input file')
-@click.option('--min-priority', type=float, default=0.0,
-              help='Minimum priority score to show')
+@click.option('--min-priority', type=float, default=0.0, callback=_unit_interval,
+              help='Minimum priority score to show (0.0-1.0)')
 @click.option('--format', '-f', type=click.Choice(['table', 'list', 'json']), default='table',
               help='Output format')
 def list_unfinished(input_files, platforms, min_priority, format):
