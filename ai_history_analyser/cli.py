@@ -9,6 +9,7 @@ from tqdm import tqdm
 from .parsers import get_parser
 from .analyzers import get_analyzer
 from .exporters import get_exporter
+from .fileio import UnsafeDestinationError, write_text_file
 from .models import Conversation, Platform
 
 
@@ -238,8 +239,10 @@ def init_config(output):
         }
     }
     
-    with open(output, 'w') as f:
-        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+    try:
+        write_text_file(output, yaml.dump(config, default_flow_style=False, sort_keys=False))
+    except UnsafeDestinationError as e:
+        raise click.ClickException(str(e))
     
     click.echo(f"Created configuration file: {output}")
 

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, Any
 
 from .base import BaseExporter
+from ..fileio import write_text_file
 from ..models import AnalysisResult
 
 
@@ -50,8 +51,7 @@ class JSONExporter(BaseExporter):
         }
         
         # Write JSON
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        write_text_file(output_file, json.dumps(data, indent=2, ensure_ascii=False))
         
         return output_file
 
