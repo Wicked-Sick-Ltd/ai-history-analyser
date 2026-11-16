@@ -1,5 +1,7 @@
 """Command-line interface for AI History Analyser"""
 
+import sys
+
 import click
 import yaml
 from pathlib import Path
@@ -22,6 +24,12 @@ def load_config(config_path: Path = None) -> dict:
     
     with open(config_path, 'r') as f:
         return yaml.safe_load(f) or {}
+
+
+def echo_untrusted(message: str) -> None:
+    """Echo text derived from an export, replacing characters stdout cannot encode"""
+    encoding = getattr(sys.stdout, 'encoding', None) or 'utf-8'
+    click.echo(message.encode(encoding, errors='replace').decode(encoding, errors='replace'))
 
 
 @click.group()
@@ -136,9 +144,9 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
         if result.unfinished_projects:
             click.echo("\nTop 5 Projects by Priority:")
             for i, project in enumerate(result.unfinished_projects[:5], 1):
-                click.echo(f"\n{i}. {project.title}")
+                echo_untrusted(f"\n{i}. {project.title}")
                 click.echo(f"   Priority: {project.priority_score:.2f} | Confidence: {project.confidence:.2f}")
-                click.echo(f"   {project.description[:100]}...")
+                echo_untrusted(f"   {project.description[:100]}...")
 
 
 @cli.command()
@@ -196,13 +204,13 @@ def list_unfinished(input_files, platforms, min_priority, format):
         click.echo(json.dumps(data, indent=2))
     elif format == 'list':
         for i, project in enumerate(projects, 1):
-            click.echo(f"{i}. {project.title} (Priority: {project.priority_score:.2f})")
+            echo_untrusted(f"{i}. {project.title} (Priority: {project.priority_score:.2f})")
     else:  # table
         click.echo(f"\n{'#':<4} {'Title':<50} {'Priority':<10} {'Confidence':<10} {'Platform':<10}")
         click.echo("-" * 90)
         for i, project in enumerate(projects, 1):
             title = project.title[:47] + "..." if len(project.title) > 50 else project.title
-            click.echo(f"{i:<4} {title:<50} {project.priority_score:<10.2f} {project.confidence:<10.2f} {project.source_platform.value:<10}")
+            echo_untrusted(f"{i:<4} {title:<50} {project.priority_score:<10.2f} {project.confidence:<10.2f} {project.source_platform.value:<10}")
 
 
 @cli.command()

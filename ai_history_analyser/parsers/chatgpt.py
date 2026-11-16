@@ -1,6 +1,5 @@
 """Parser for ChatGPT export format"""
 
-import json
 from pathlib import Path
 from typing import List, Dict, Any
 from datetime import datetime
@@ -18,8 +17,7 @@ class ChatGPTParser(BaseParser):
     
     def parse(self, file_path: Path) -> List[Conversation]:
         """Parse ChatGPT export file"""
-        with open(file_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        data = self._load_json(file_path)
         
         conversations = []
         
