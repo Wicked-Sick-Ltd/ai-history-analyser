@@ -1,5 +1,7 @@
 """Command-line interface for AI History Analyser"""
 
+import sys
+
 import click
 import yaml
 from pathlib import Path
@@ -104,7 +106,7 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
         if verbose:
             import traceback
             traceback.print_exc()
-        return
+        sys.exit(1)
     
     # Export results
     if output:
