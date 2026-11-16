@@ -99,8 +99,15 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
     try:
         result = analyzer_instance.analyze(all_conversations, analyzer_config)
         click.echo(f"Found {len(result.unfinished_projects)} unfinished projects")
-    except Exception as e:
+    except ValueError as e:
+        # Configuration errors are raised with a fixed, pattern-free message,
+        # so they are safe to show to the user.
         click.echo(f"Error during analysis: {e}", err=True)
+        return
+    except Exception:
+        # Never print the raw exception: it can carry attacker-influenced text
+        # (e.g. from configured keyword patterns) straight to the terminal.
+        click.echo("Error during analysis: the analysis could not be completed", err=True)
         if verbose:
             import traceback
             traceback.print_exc()
