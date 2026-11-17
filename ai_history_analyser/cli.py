@@ -10,6 +10,7 @@ from .parsers import get_parser
 from .analyzers import get_analyzer
 from .exporters import get_exporter
 from .models import Conversation, Platform
+from .safe_io import write_text_file
 
 
 def load_config(config_path: Path = None) -> dict:
@@ -238,8 +239,7 @@ def init_config(output):
         }
     }
     
-    with open(output, 'w') as f:
-        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+    write_text_file(output, yaml.dump(config, default_flow_style=False, sort_keys=False))
     
     click.echo(f"Created configuration file: {output}")
 
