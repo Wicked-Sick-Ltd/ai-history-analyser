@@ -61,7 +61,7 @@ def _write(path: Path, data: bytes, dir_fd: Optional[int], target: str) -> None:
         try:
             os.unlink(tmp, dir_fd=dir_fd)
         except FileNotFoundError:
-            pass
+            pass  # Temp file may not exist during cleanup; this is safe to ignore.
         raise
 
 

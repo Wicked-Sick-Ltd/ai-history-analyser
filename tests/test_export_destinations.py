@@ -103,7 +103,7 @@ def test_obsidian_index_fifo_does_not_block(export_dir):
     def run():
         try:
             ObsidianExporter().export(_result(), vault)
-        except BaseException as exc:  # noqa: BLE001
+        except Exception as exc:
             outcome["error"] = exc
 
     worker = threading.Thread(target=run, daemon=True)
@@ -163,6 +163,25 @@ def test_symlink_swapped_in_during_write_is_not_followed(monkeypatch, victim, ex
 
     assert victim.read_text() == VICTIM_CONTENT
     assert [p.name for p in folder.iterdir()] == [INDEX_NAME]
+
+
+def test_cleanup_ignores_missing_temp_file(monkeypatch, tmp_path):
+    dest = tmp_path / "note.md"
+    dest.write_text("keep\n")
+
+    def fail_fsync(_fd):
+        raise OSError("disk full")
+
+    def unlink_missing(*_args, **_kwargs):
+        raise FileNotFoundError("temp already gone")
+
+    monkeypatch.setattr(fileio.os, "fsync", fail_fsync)
+    monkeypatch.setattr(fileio.os, "unlink", unlink_missing)
+
+    with pytest.raises(OSError, match="disk full"):
+        fileio.write_text_file(dest, "new\n")
+
+    assert dest.read_text() == "keep\n"
 
 
 def test_existing_regular_index_is_replaced(export_dir):
