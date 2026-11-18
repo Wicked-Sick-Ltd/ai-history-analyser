@@ -61,26 +61,61 @@ def _snapshot(directory: Path):
     return found
 
 
-def _install_regular_file_stat_lie(config_path: Path) -> None:
+def _path_key(path) -> str:
+    text = os.fspath(path)
+    if isinstance(text, bytes):
+        text = os.fsdecode(text)
+    return os.path.normcase(os.path.normpath(os.path.abspath(text)))
+
+
+def _config_stat_keys(config_path: Path):
+    """Spellings of ``config_path`` that a load might stat.
+
+    The parent is resolved and the final name is not. ``Path.cwd()`` can be
+    the physical directory while the test path stays logical (``/var`` versus
+    ``/private/var``). Following the final component would also treat a
+    symlink named ``config.yaml`` as its target.
+    """
+    logical = _path_key(config_path)
+    parent = os.path.dirname(os.fspath(config_path)) or os.curdir
+    name = os.path.basename(os.fspath(config_path))
+    if isinstance(name, bytes):
+        name = os.fsdecode(name)
+    physical = os.path.normcase(
+        os.path.normpath(os.path.join(os.path.realpath(parent), name))
+    )
+    return {logical, physical}
+
+
+def _install_regular_file_stat_lie(config_path: Path):
     """Report a regular file for every stat/lstat of ``config_path``.
 
     The directory entry is left unchanged. A later open of that path therefore
     sees the real inode, which is what a check-then-open race does.
+
+    ``os.stat`` is patched, and so is ``Path._accessor`` when this Python
+    captured ``os.stat`` there at import (3.8 through 3.10). ``Path.exists``,
+    ``Path.is_file``, and ``Path.is_symlink`` then see the lie too.
+
+    Returns a restore callable. The child that loads config can ignore it.
     """
+    import pathlib
     import posix
 
     real_stat = os.stat
     real_lstat = os.lstat
+    real_posix_stat = posix.stat
+    real_posix_lstat = posix.lstat
     decoy_dir = Path(tempfile.mkdtemp(prefix="config-stat-decoy-"))
     decoy = decoy_dir / "regular"
     decoy.write_text("placeholder: true\n")
     regular_stat = real_lstat(decoy)
-    target = os.path.abspath(config_path)
+    keys = _config_stat_keys(config_path)
 
     def same(path):
         try:
-            return os.path.abspath(os.fspath(path)) == target
-        except (TypeError, ValueError):
+            return _path_key(path) in keys
+        except (TypeError, ValueError, OSError):
             return False
 
     def lying_stat(path, *args, **kwargs):
@@ -97,6 +132,24 @@ def _install_regular_file_stat_lie(config_path: Path) -> None:
     os.lstat = lying_lstat
     posix.stat = lying_stat
     posix.lstat = lying_lstat
+
+    accessor = getattr(pathlib.Path, "_accessor", None)
+    saved_accessor = {}
+    if accessor is not None:
+        for name, replacement in (("stat", lying_stat), ("lstat", lying_lstat)):
+            if hasattr(accessor, name):
+                saved_accessor[name] = getattr(accessor, name)
+                setattr(accessor, name, replacement)
+
+    def restore():
+        os.stat = real_stat
+        os.lstat = real_lstat
+        posix.stat = real_posix_stat
+        posix.lstat = real_posix_lstat
+        for name, original in saved_accessor.items():
+            setattr(accessor, name, original)
+
+    return restore
 
 
 def _run_mode(cwd: Path, mode: str) -> dict:
@@ -155,9 +208,8 @@ def _finish_child(proc, directory: Path, before, held_writer=None):
         after = _snapshot(directory)
         held = "" if held_writer is None else " with the write end already open"
         pytest.fail(f"config load blocked{held}; directory before={before} after={after}")
-    finally:
-        if held_writer is not None:
-            os.close(held_writer)
+    # The caller closes held_writer. This helper used to close it, which
+    # closed the descriptor twice once the test's own finally ran.
 
     after = _snapshot(directory)
     assert after == before, f"config load changed the directory: {before} -> {after}"
@@ -313,12 +365,18 @@ def test_fifo_with_writer_and_stat_lie_is_not_loaded(tmp_path):
     _chat(tmp_path)
     fifo = _mkfifo(tmp_path / "config.yaml")
     holder = os.open(fifo, os.O_RDWR)
-    os.write(holder, FIFO_PAYLOAD)
-    before = _snapshot(tmp_path)
-    proc = _start_child(tmp_path, "lie-implicit")
-    data = _finish_child(proc, tmp_path, before, held_writer=holder)
-    _assert_analysis_ran(data)
-    assert stat.S_ISFIFO(os.lstat(fifo).st_mode)
+    try:
+        os.write(holder, FIFO_PAYLOAD)
+        before = _snapshot(tmp_path)
+        proc = _start_child(tmp_path, "lie-implicit")
+        # The write end stays open until the child has finished. Closing it
+        # here, including when the child blocks and the assertion fails, is
+        # what releases the descriptor.
+        data = _finish_child(proc, tmp_path, before, held_writer=holder)
+        _assert_analysis_ran(data)
+        assert stat.S_ISFIFO(os.lstat(fifo).st_mode)
+    finally:
+        os.close(holder)
 
 
 def test_symlink_stat_lie_does_not_block_analyze(tmp_path):
@@ -332,6 +390,31 @@ def test_symlink_stat_lie_does_not_block_analyze(tmp_path):
     _assert_analysis_ran(data)
     assert os.path.islink(config)
     assert os.readlink(config) == fifo.name
+    assert stat.S_ISFIFO(os.lstat(fifo).st_mode)
+
+
+def test_stat_lie_fools_pathlib_for_both_directory_spellings(tmp_path):
+    """The lie has to cover pathlib and a resolved parent, not only os.stat."""
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    fifo = link / "config.yaml"
+    _mkfifo(fifo)
+    other = real / "other.txt"
+    other.write_text("keep\n")
+    physical = Path(os.path.realpath(real)) / "config.yaml"
+    restore = _install_regular_file_stat_lie(fifo)
+    try:
+        for path in (fifo, physical):
+            assert Path(path).exists()
+            assert Path(path).is_file()
+            assert not Path(path).is_symlink()
+        assert Path(other).is_file()
+        assert Path(other).read_text() == "keep\n"
+        assert not Path(real / "missing").exists()
+    finally:
+        restore()
     assert stat.S_ISFIFO(os.lstat(fifo).st_mode)
 
 
