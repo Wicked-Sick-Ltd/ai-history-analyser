@@ -153,11 +153,47 @@ class _OpenSpy:
 
     def __init__(self, real_open, output_path, config_path=None, reread_text=None):
         self.real_open = real_open
+        self.real_os_open = os.open
+        self.real_replace = os.replace
         self.output_path = Path(output_path).resolve()
         self.config_path = None if config_path is None else Path(config_path).resolve()
         self.reread_text = reread_text
         self.config_reads = 0
         self.output_writes = []
+
+    def install(self, monkeypatch):
+        """Watch both ``open`` and the ``os.open`` plus ``os.replace`` export path."""
+        monkeypatch.setattr(builtins, "open", self)
+        monkeypatch.setattr(os, "open", self._os_open)
+        monkeypatch.setattr(os, "replace", self._replace)
+
+    def _published(self, path, dir_fd=None):
+        try:
+            if isinstance(path, int):
+                return None
+            text = os.fspath(path)
+            if isinstance(text, bytes):
+                text = os.fsdecode(text)
+            if dir_fd is not None:
+                text = os.path.join(os.readlink("/proc/self/fd/%s" % dir_fd), text)
+            return Path(text).resolve()
+        except (OSError, TypeError, ValueError):
+            return None
+
+    def _note_write(self, path):
+        if path == self.output_path:
+            self.output_writes.append(path)
+
+    def _os_open(self, path, flags, mode=0o777, *, dir_fd=None):
+        fd = self.real_os_open(path, flags, mode, dir_fd=dir_fd)
+        write_bits = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT
+        if flags & write_bits:
+            self._note_write(self._published(path, dir_fd))
+        return fd
+
+    def _replace(self, src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+        self.real_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+        self._note_write(self._published(dst, dst_dir_fd))
 
     def __call__(self, file, mode="r", *args, **kwargs):
         path = None
@@ -165,7 +201,7 @@ class _OpenSpy:
             path = Path(file).resolve()
         mode_text = mode if isinstance(mode, str) else "r"
         if path == self.output_path and any(flag in mode_text for flag in ("w", "a", "x", "+")):
-            self.output_writes.append(path)
+            self._note_write(path)
         if (
             self.config_path is not None
             and path == self.config_path
@@ -189,7 +225,7 @@ def _invoke(tmp_path, monkeypatch, export_path, output_path, config_text, args, 
         reread_text=reread_text,
     )
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(builtins, "open", spy)
+    spy.install(monkeypatch)
     result = CliRunner().invoke(cli, args, catch_exceptions=False)
     return result, spy
 
@@ -261,6 +297,31 @@ def test_config_value_is_checked_after_it_replaces_the_constructor_value(convers
         analyzer.analyze([conversation], _section(".nan"))
 
 
+def test_open_spy_records_a_directory_fd_replace(tmp_path, monkeypatch):
+    """JSON export publishes with os.replace relative to a directory fd."""
+    output = tmp_path / "results.json"
+    spy = _OpenSpy(builtins.open, output)
+    spy.install(monkeypatch)
+    directory = os.open(tmp_path, os.O_RDONLY)
+    try:
+        fd = os.open(
+            ".results.json.tmp",
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o644,
+            dir_fd=directory,
+        )
+        os.close(fd)
+        os.replace(
+            ".results.json.tmp",
+            output.name,
+            src_dir_fd=directory,
+            dst_dir_fd=directory,
+        )
+    finally:
+        os.close(directory)
+    assert spy.output_writes == [output.resolve()]
+
+
 def test_threshold_spy_equality_includes_its_read_count():
     first = _ThresholdThatChanges()
     second = _ThresholdThatChanges()
@@ -311,7 +372,7 @@ def test_cli_explicit_config_is_the_file_that_is_checked(tmp_path, monkeypatch, 
     chosen = tmp_path / "chosen.yaml"
     chosen.write_text(_config_text("unfinished-projects", "0.5"))
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(builtins, "open", _OpenSpy(builtins.open, output_path))
+    _OpenSpy(builtins.open, output_path).install(monkeypatch)
     result = CliRunner().invoke(
         cli,
         _analyze_args(export_path, output_path, config_path=chosen),
@@ -330,7 +391,7 @@ def test_cli_explicit_invalid_config_writes_nothing(tmp_path, monkeypatch, expor
     (tmp_path / "config.yaml").write_text(_config_text("unfinished-projects", "0.5"))
     monkeypatch.chdir(tmp_path)
     spy = _OpenSpy(builtins.open, output_path)
-    monkeypatch.setattr(builtins, "open", spy)
+    spy.install(monkeypatch)
     result = CliRunner().invoke(
         cli,
         _analyze_args(export_path, output_path, config_path=chosen),
