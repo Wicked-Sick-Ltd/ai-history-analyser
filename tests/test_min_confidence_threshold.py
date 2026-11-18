@@ -267,9 +267,10 @@ def test_threshold_spy_equality_includes_its_read_count():
     assert first == second
     assert first == {}
     assert first.__eq__("min_confidence") is NotImplemented
-    first["min_confidence"]
-    assert first != second
-    assert second != first
+    assert first["min_confidence"] == 0.0
+    assert not (first == second)
+    assert not (second == first)
+    assert first.__ne__(second) is True
     assert first == {}
 
 
