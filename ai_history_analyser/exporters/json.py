@@ -6,6 +6,7 @@ from typing import Dict, Any
 
 from .base import BaseExporter
 from ..models import AnalysisResult
+from ..safe_io import open_output_target
 
 
 class JSONExporter(BaseExporter):
@@ -17,12 +18,6 @@ class JSONExporter(BaseExporter):
     def export(self, result: AnalysisResult, output_path: Path, config: dict = None) -> Path:
         """Export to JSON format"""
         config = config or {}
-        
-        # Determine output file
-        if output_path.is_dir():
-            output_file = output_path / "analysis_results.json"
-        else:
-            output_file = output_path
         
         # Convert to dict
         data = {
@@ -50,8 +45,9 @@ class JSONExporter(BaseExporter):
         }
         
         # Write JSON
-        with open(output_file, 'w', encoding='utf-8') as f:
+        out_dir, name = open_output_target(output_path, "analysis_results.json")
+        with out_dir, out_dir.open_text(name) as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
         
-        return output_file
+        return out_dir.path / name
 
