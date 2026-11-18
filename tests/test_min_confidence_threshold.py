@@ -132,6 +132,21 @@ class _ThresholdThatChanges(dict):
             return self[key]
         return default
 
+    def __eq__(self, other):
+        if isinstance(other, _ThresholdThatChanges):
+            return dict.__eq__(self, other) and self.reads == other.reads
+        if isinstance(other, dict):
+            return dict.__eq__(self, other)
+        return NotImplemented
+
+    def __ne__(self, other):
+        # dict's C inequality does not call a Python __eq__, so != would
+        # ignore ``reads`` unless it is defined here too.
+        equal = self.__eq__(other)
+        if equal is NotImplemented:
+            return NotImplemented
+        return not equal
+
 
 class _OpenSpy:
     """Record output writes, and optionally change later reads of one config."""
@@ -244,6 +259,18 @@ def test_config_value_is_checked_after_it_replaces_the_constructor_value(convers
     analyzer = UnfinishedProjectsAnalyzer(min_confidence=0.5)
     with pytest.raises(ValueError, match="min_confidence"):
         analyzer.analyze([conversation], _section(".nan"))
+
+
+def test_threshold_spy_equality_includes_its_read_count():
+    first = _ThresholdThatChanges()
+    second = _ThresholdThatChanges()
+    assert first == second
+    assert first == {}
+    assert first.__eq__("min_confidence") is NotImplemented
+    first["min_confidence"]
+    assert first != second
+    assert second != first
+    assert first == {}
 
 
 def test_threshold_is_not_read_again_between_the_check_and_the_filter(conversation):
