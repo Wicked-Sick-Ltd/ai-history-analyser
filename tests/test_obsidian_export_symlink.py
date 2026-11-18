@@ -542,10 +542,7 @@ def test_obsidian_export_directory_swapped_to_symlink_before_write(tmp_path):
         outside=outside,
         note_names=(INDEX_NAME, PROJECT_NOTE),
     ) as state:
-        try:
-            ObsidianExporter().export(sample_result(), vault, {})
-        except OSError:
-            pass
+        call_export(lambda: ObsidianExporter().export(sample_result(), vault, {}))
 
     assert state["done"], "note open was not observed; the swap could not run"
     assert_untouched(outside, before, "export directory swapped before write")
@@ -564,10 +561,7 @@ def test_obsidian_export_note_swapped_to_symlink_before_write(tmp_path):
         outside=outside,
         note_names=(INDEX_NAME, PROJECT_NOTE),
     ) as state:
-        try:
-            ObsidianExporter().export(sample_result(), vault, {})
-        except OSError:
-            pass
+        call_export(lambda: ObsidianExporter().export(sample_result(), vault, {}))
 
     assert state["done"], "note open was not observed; the file swap could not run"
     assert_untouched(outside, before, "note path swapped to a symlink before write")
@@ -682,10 +676,7 @@ def test_json_export_directory_swapped_to_symlink_before_write(tmp_path):
         outside=outside,
         note_names=(JSON_NAME,),
     ) as state:
-        try:
-            JSONExporter().export(sample_result(), output, {})
-        except OSError:
-            pass
+        call_export(lambda: JSONExporter().export(sample_result(), output, {}))
 
     assert state["done"], "JSON open was not observed; the swap could not run"
     assert_untouched(outside, before, "JSON directory swapped before write")
@@ -705,10 +696,7 @@ def test_json_export_file_swapped_to_symlink_before_write(tmp_path):
         target_path=output,
         outside_file=target,
     ) as state:
-        try:
-            JSONExporter().export(sample_result(), output, {})
-        except OSError:
-            pass
+        call_export(lambda: JSONExporter().export(sample_result(), output, {}))
 
     assert state["done"], "JSON open was not observed; the file swap could not run"
     assert_untouched(outside, before, "JSON file swapped to a symlink before write")
