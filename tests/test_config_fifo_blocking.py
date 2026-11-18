@@ -99,7 +99,6 @@ def _install_regular_file_stat_lie(config_path: Path):
 
     Returns a restore callable. The child that loads config can ignore it.
     """
-    import pathlib
     import posix
 
     real_stat = os.stat
@@ -133,7 +132,7 @@ def _install_regular_file_stat_lie(config_path: Path):
     posix.stat = lying_stat
     posix.lstat = lying_lstat
 
-    accessor = getattr(pathlib.Path, "_accessor", None)
+    accessor = getattr(Path, "_accessor", None)
     saved_accessor = {}
     if accessor is not None:
         for name, replacement in (("stat", lying_stat), ("lstat", lying_lstat)):
