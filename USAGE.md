@@ -131,6 +131,10 @@ Different platforms may export in slightly different formats. If parsing fails:
 2. Try exporting again from the platform
 3. Open an issue with a sample of your export format
 
+### `�` in titles or descriptions
+
+Exports sometimes contain broken characters, such as half of an emoji's UTF-16 surrogate pair (for example `\ud800` on its own). The parsers replace these with `�` (U+FFFD) when loading the file, so the rest of the results still print and export. Terminal output also replaces any character your terminal's encoding cannot show.
+
 ### "Refusing to write ...: it is not a regular file"
 
 Exports and `init-config` replace existing output files instead of writing through them. They

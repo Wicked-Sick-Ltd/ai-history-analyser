@@ -1,11 +1,54 @@
 """Base parser interface"""
 
+import json
+import re
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any, List, Optional
 from pathlib import Path
 
+from ..fileutils import open_regular_for_read
 from ..models import Conversation, Platform
+
+_LONE_SURROGATE = re.compile('[\ud800-\udfff]')
+
+
+def _replace_surrogates(text: str) -> str:
+    return _LONE_SURROGATE.sub('\ufffd', text)
+
+
+def replace_lone_surrogates(data: Any) -> Any:
+    """Replace lone UTF-16 surrogates in every string and key of decoded JSON with U+FFFD.
+
+    json.load turns escapes such as "\\ud800" into str characters that cannot be
+    encoded as UTF-8, so any later print or file write of them would raise.
+    Walks iteratively so deeply nested exports cannot exhaust the recursion limit.
+    """
+    if isinstance(data, str):
+        return _replace_surrogates(data)
+
+    stack = [data]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            items = list(node.items())
+            node.clear()
+            for key, value in items:
+                if isinstance(key, str):
+                    key = _replace_surrogates(key)
+                if isinstance(value, str):
+                    value = _replace_surrogates(value)
+                elif isinstance(value, (dict, list)):
+                    stack.append(value)
+                node[key] = value
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                if isinstance(value, str):
+                    node[index] = _replace_surrogates(value)
+                elif isinstance(value, (dict, list)):
+                    stack.append(value)
+    return data
+
 
 # dateutil's cost grows quadratically with the length of a numeric token, so
 # export fields longer than any real timestamp are never handed to it.
@@ -34,6 +77,14 @@ class BaseParser(ABC):
         """
         pass
     
+    def _load_json(self, file_path: Path) -> Any:
+        """Load a JSON export from a regular file, with lone surrogates replaced.
+
+        The open does not block on a FIFO or other non-regular file.
+        """
+        with open_regular_for_read(file_path, encoding='utf-8') as f:
+            return replace_lone_surrogates(json.load(f))
+
     def validate(self, file_path: Path) -> bool:
         """
         Validate that a file can be parsed by this parser

@@ -1,11 +1,9 @@
 """Parser for Google Gemini export format"""
 
-import json
 from pathlib import Path
 from typing import List, Dict, Any
 
 from .base import BaseParser
-from ..fileutils import open_regular_for_read
 from ..models import Conversation, Message, Platform
 
 
@@ -18,8 +16,7 @@ class GeminiParser(BaseParser):
     
     def parse(self, file_path: Path) -> List[Conversation]:
         """Parse Gemini export file"""
-        with open_regular_for_read(file_path, encoding='utf-8') as f:
-            data = json.load(f)
+        data = self._load_json(file_path)
         
         conversations = []
         
