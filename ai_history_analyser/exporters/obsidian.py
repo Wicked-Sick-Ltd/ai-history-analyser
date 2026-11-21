@@ -1,10 +1,12 @@
 """Obsidian markdown exporter"""
 
+import io
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any
 
 from .base import BaseExporter
+from ..fileio import write_text_file
 from ..models import AnalysisResult, UnfinishedProject
 
 
@@ -14,9 +16,20 @@ class ObsidianExporter(BaseExporter):
     def get_name(self) -> str:
         return "obsidian"
     
+    def validate_config(self, config: dict) -> dict:
+        """Check the folder setting and return a normalized copy"""
+        config = super().validate_config(config)
+        if 'folder' in config:
+            folder = config['folder']
+            if not isinstance(folder, str):
+                raise ValueError("folder must be a string")
+            if '\x00' in folder:
+                raise ValueError("folder must not contain a null character")
+        return config
+
     def export(self, result: AnalysisResult, output_path: Path, config: dict = None) -> Path:
         """Export to Obsidian format"""
-        config = config or {}
+        config = self.validate_config(config if config is not None else {})
         
         # Determine output directory
         if output_path.is_dir():
@@ -41,7 +54,7 @@ class ObsidianExporter(BaseExporter):
         """Create the main index file"""
         index_path = output_dir / "Unfinished Projects Index.md"
         
-        with open(index_path, 'w', encoding='utf-8') as f:
+        with io.StringIO() as f:
             f.write("# Unfinished Projects Index\n\n")
             f.write(f"*Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n\n")
             f.write(f"**Platform:** {result.platform.value.title()}\n")
@@ -79,6 +92,8 @@ class ObsidianExporter(BaseExporter):
                 
                 f.write(f"\n{project.description[:200]}...\n\n")
                 f.write("---\n\n")
+
+            write_text_file(index_path, f.getvalue())
         
         return index_path
     
@@ -87,7 +102,7 @@ class ObsidianExporter(BaseExporter):
         filename = self._get_project_filename(project)
         file_path = output_dir / f"{filename}.md"
         
-        with open(file_path, 'w', encoding='utf-8') as f:
+        with io.StringIO() as f:
             f.write(f"# {project.title}\n\n")
             
             # Metadata
@@ -136,6 +151,8 @@ class ObsidianExporter(BaseExporter):
             f.write(f"priority: {project.priority_score:.2f}\n")
             f.write(f"confidence: {project.confidence:.2f}\n")
             f.write("```\n")
+
+            write_text_file(file_path, f.getvalue())
     
     def _get_project_filename(self, project: UnfinishedProject) -> str:
         """Generate a safe filename for the project"""

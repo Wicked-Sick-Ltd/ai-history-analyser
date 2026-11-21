@@ -131,3 +131,9 @@ Different platforms may export in slightly different formats. If parsing fails:
 2. Try exporting again from the platform
 3. Open an issue with a sample of your export format
 
+### "Refusing to write ...: it is not a regular file"
+
+Exports and `init-config` replace existing output files instead of writing through them. They
+refuse to write when the output name is a symlink, named pipe, device or directory. Remove or
+rename that entry, or choose a different output path.
+

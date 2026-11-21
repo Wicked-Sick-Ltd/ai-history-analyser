@@ -1,5 +1,6 @@
 """Analyzer for detecting unfinished projects"""
 
+import math
 import re
 from typing import List, Dict, Any
 from datetime import datetime
@@ -7,6 +8,51 @@ import hashlib
 
 from .base import BaseAnalyzer
 from ..models import Conversation, UnfinishedProject, AnalysisResult, Platform
+
+
+def _invalid_min_confidence(value: Any) -> ValueError:
+    try:
+        shown = repr(value)
+    except Exception:
+        shown = f"<{type(value).__name__}>"
+    if len(shown) > 40:
+        shown = shown[:37] + "..."
+    return ValueError(f"min_confidence must be a finite number between 0 and 1, got {shown}")
+
+
+def _validate_min_confidence(value: Any) -> float:
+    """Return value as a plain float, or raise ValueError unless it is a finite number in [0, 1]."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _invalid_min_confidence(value)
+    try:
+        threshold = float(value)
+    except (OverflowError, TypeError, ValueError):
+        raise _invalid_min_confidence(value) from None
+    if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise _invalid_min_confidence(value)
+    return threshold
+
+
+def _compile_keywords(keywords: List[str]) -> List["re.Pattern"]:
+    """Compile keyword patterns, reporting invalid ones by index only.
+
+    Keyword patterns can come from a user-supplied config file. Letting
+    ``re.compile`` raise directly leaks the pattern text into the error
+    message (for example ``re.error`` echoes the character after ``(?`` for
+    an unknown extension), which can carry raw terminal control characters
+    into whatever prints the error. Raise a fixed message that names the
+    offending keyword by index and never includes the pattern text, and drop
+    the original exception chain so it cannot resurface in a traceback.
+    """
+    compiled = []
+    for index, pattern in enumerate(keywords):
+        try:
+            compiled.append(re.compile(pattern, re.IGNORECASE))
+        except re.error:
+            raise ValueError(
+                f"Invalid regular expression for keyword at index {index}"
+            ) from None
+    return compiled
 
 
 class UnfinishedProjectsAnalyzer(BaseAnalyzer):
@@ -48,22 +94,53 @@ class UnfinishedProjectsAnalyzer(BaseAnalyzer):
             min_confidence: Minimum confidence threshold (0.0-1.0)
         """
         self.keywords = keywords or self.DEFAULT_KEYWORDS
-        self.min_confidence = min_confidence
-        self.compiled_patterns = [re.compile(pattern, re.IGNORECASE) for pattern in self.keywords]
+        self.min_confidence = _validate_min_confidence(min_confidence)
+        self.compiled_patterns = _compile_keywords(self.keywords)
     
     def get_name(self) -> str:
         return "unfinished_projects"
     
+    def validate_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Check keywords and min_confidence and return a normalized copy"""
+        config = super().validate_config(config)
+
+        if 'keywords' in config:
+            keywords = config['keywords']
+            if not isinstance(keywords, list) or not all(isinstance(k, str) for k in keywords):
+                raise ValueError("keywords must be a list of strings")
+            # Compile through the index-only helper so a bad pattern cannot
+            # echo its own text, including terminal control characters.
+            _compile_keywords(keywords)
+            config['keywords'] = list(keywords)
+
+        if 'min_confidence' in config:
+            min_confidence = config['min_confidence']
+            if isinstance(min_confidence, bool) or not isinstance(min_confidence, (int, float)):
+                raise ValueError("min_confidence must be a number")
+            try:
+                min_confidence = float(min_confidence)
+            except OverflowError:
+                raise ValueError("min_confidence must be a finite number") from None
+            if not math.isfinite(min_confidence):
+                raise ValueError("min_confidence must be a finite number")
+            config['min_confidence'] = min_confidence
+
+        return config
+
     def analyze(self, conversations: List[Conversation], config: Dict[str, Any] = None) -> AnalysisResult:
         """Analyze conversations for unfinished projects"""
-        config = config or {}
+        config = self.validate_config(config if config is not None else {})
         
-        # Override settings from config
+        # Override settings from config. The threshold is read once and the
+        # validated float is what filters hits.
+        if 'min_confidence' in config:
+            min_confidence = _validate_min_confidence(config['min_confidence'])
+        else:
+            min_confidence = _validate_min_confidence(self.min_confidence)
+        self.min_confidence = min_confidence
         if 'keywords' in config:
             self.keywords = config['keywords']
-            self.compiled_patterns = [re.compile(pattern, re.IGNORECASE) for pattern in self.keywords]
-        if 'min_confidence' in config:
-            self.min_confidence = config['min_confidence']
+            self.compiled_patterns = _compile_keywords(self.keywords)
         
         unfinished_projects = []
         platform = None
@@ -72,7 +149,7 @@ class UnfinishedProjectsAnalyzer(BaseAnalyzer):
             if not platform:
                 platform = conv.platform
             
-            projects = self._analyze_conversation(conv)
+            projects = self._analyze_conversation(conv, min_confidence)
             unfinished_projects.extend(projects)
         
         # Calculate priorities
@@ -88,7 +165,7 @@ class UnfinishedProjectsAnalyzer(BaseAnalyzer):
             unfinished_projects=unfinished_projects
         )
     
-    def _analyze_conversation(self, conversation: Conversation) -> List[UnfinishedProject]:
+    def _analyze_conversation(self, conversation: Conversation, min_confidence: float) -> List[UnfinishedProject]:
         """Analyze a single conversation for unfinished projects"""
         projects = []
         
@@ -116,7 +193,7 @@ class UnfinishedProjectsAnalyzer(BaseAnalyzer):
         for i, group in enumerate(grouped_matches):
             confidence = self._calculate_confidence(group, full_text)
             
-            if confidence >= self.min_confidence:
+            if confidence >= min_confidence:
                 project = self._create_project(
                     conversation=conversation,
                     matches=group,

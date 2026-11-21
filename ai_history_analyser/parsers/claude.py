@@ -3,9 +3,9 @@
 import json
 from pathlib import Path
 from typing import List, Dict, Any
-from datetime import datetime
 
 from .base import BaseParser
+from ..fileutils import open_regular_for_read
 from ..models import Conversation, Message, Platform
 
 
@@ -18,7 +18,7 @@ class ClaudeParser(BaseParser):
     
     def parse(self, file_path: Path) -> List[Conversation]:
         """Parse Claude export file"""
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open_regular_for_read(file_path, encoding='utf-8') as f:
             data = json.load(f)
         
         conversations = []
@@ -106,27 +106,4 @@ class ClaudeParser(BaseParser):
             timestamp=timestamp,
             metadata=data
         )
-    
-    def _parse_timestamp(self, value: Any) -> datetime:
-        """Parse timestamp from various formats"""
-        if not value:
-            return None
-        
-        if isinstance(value, (int, float)):
-            try:
-                return datetime.fromtimestamp(value)
-            except (ValueError, OSError):
-                return None
-        
-        if isinstance(value, str):
-            try:
-                return datetime.fromisoformat(value.replace('Z', '+00:00'))
-            except ValueError:
-                try:
-                    from dateutil.parser import parse as date_parse
-                    return date_parse(value)
-                except Exception:
-                    return None
-        
-        return None
 

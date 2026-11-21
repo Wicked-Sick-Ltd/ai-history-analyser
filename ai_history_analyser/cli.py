@@ -1,27 +1,166 @@
 """Command-line interface for AI History Analyser"""
 
+import math
+import os
+import stat
+import sys
+
 import click
 import yaml
 from pathlib import Path
-from typing import List, Tuple
+from typing import Optional
 from tqdm import tqdm
 
 from .parsers import get_parser
 from .analyzers import get_analyzer
 from .exporters import get_exporter
 from .models import Conversation, Platform
+from .fileio import UnsafeDestinationError, write_text_file
+
+
+# The root collection is depth 1; scalars do not add a level.
+MAX_CONFIG_DEPTH = 16
+# Every scalar, sequence and mapping counts, including mapping keys.
+MAX_CONFIG_NODES = 1024
+MAX_CONFIG_BYTES = 1024 * 1024
+CONFIG_REJECTED = "Error: configuration rejected"
+
+
+class ConfigError(Exception):
+    """Configuration could not be loaded within the allowed limits"""
+
+
+class _BoundedLoader(yaml.SafeLoader):
+    """SafeLoader that enforces depth and node limits before composing a node.
+
+    PyYAML's composer recurses once per nesting level, so the depth check must
+    happen before descending. Aliases are refused because they let a small
+    document stand for a structure deeper or larger than these limits allow.
+    """
+
+    def __init__(self, stream):
+        super().__init__(stream)
+        self._config_depth = 0
+        self._config_nodes = 0
+
+    def compose_node(self, parent, index):
+        if self.check_event(yaml.AliasEvent):
+            raise ConfigError("aliases are not allowed")
+        self._config_nodes += 1
+        if self._config_nodes > MAX_CONFIG_NODES:
+            raise ConfigError("too many nodes")
+        if not self.check_event(yaml.SequenceStartEvent, yaml.MappingStartEvent):
+            return super().compose_node(parent, index)
+        self._config_depth += 1
+        if self._config_depth > MAX_CONFIG_DEPTH:
+            raise ConfigError("nesting too deep")
+        try:
+            return super().compose_node(parent, index)
+        finally:
+            self._config_depth -= 1
+
+
+def _read_config_bytes(config_path: Path, implicit: bool) -> Optional[bytes]:
+    """Read at most MAX_CONFIG_BYTES + 1 bytes, or None if it cannot be used.
+
+    None means the path is missing or is not a regular file opened without
+    blocking. Implicit config.yaml is not followed when it is a symlink.
+    An explicit path may be followed, and the descriptor is kept only when it
+    is a regular file, so a FIFO or a lied stat is never read.
+    """
+    flags = (
+        os.O_RDONLY
+        | getattr(os, 'O_BINARY', 0)
+        | getattr(os, 'O_NONBLOCK', 0)
+        | getattr(os, 'O_CLOEXEC', 0)
+        | getattr(os, 'O_NOCTTY', 0)
+    )
+    expected = None
+    if implicit:
+        flags |= getattr(os, 'O_NOFOLLOW', 0)
+        try:
+            expected = os.lstat(config_path)
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISREG(expected.st_mode):
+            return None
+
+    try:
+        fd = os.open(config_path, flags)
+    except OSError:
+        return None
+
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            return None
+        if (
+            expected is not None
+            and (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino)
+        ):
+            return None
+        with os.fdopen(fd, 'rb') as f:
+            fd = None
+            return f.read(MAX_CONFIG_BYTES + 1)
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _parse_config(data: bytes) -> dict:
+    loader = _BoundedLoader(data)
+    try:
+        loaded = loader.get_single_data()
+    finally:
+        loader.dispose()
+    if loaded is None:
+        return {}
+    if not isinstance(loaded, dict):
+        raise ConfigError("configuration root must be a mapping")
+    return loaded
 
 
 def load_config(config_path: Path = None) -> dict:
-    """Load configuration from file"""
-    if config_path is None:
+    """Load configuration from file.
+
+    A missing path, or one that is not a regular file, yields an empty
+    mapping and does not block. A regular file that cannot be parsed within
+    the limits raises ConfigError. The error never carries bytes from the file.
+    """
+    implicit = config_path is None
+    if implicit:
         config_path = Path.cwd() / "config.yaml"
-    
-    if not config_path.exists():
+
+    try:
+        data = _read_config_bytes(config_path, implicit)
+        if data is None:
+            return {}
+        if len(data) > MAX_CONFIG_BYTES:
+            raise ConfigError("configuration file too large")
+        return _parse_config(data)
+    except ConfigError:
+        raise
+    except Exception:
+        # PyYAML scanners and constructors raise YAMLError, ValueError,
+        # TypeError and others whose messages quote the document.
+        raise ConfigError("configuration could not be loaded") from None
+
+
+def config_section(mapping: dict, key) -> dict:
+    """Return mapping[key] as a dict, treating a missing or null value as empty."""
+    value = mapping.get(key)
+    if value is None:
         return {}
-    
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f) or {}
+    if not isinstance(value, dict):
+        raise ConfigError("configuration section must be a mapping")
+    return value
+
+
+def _unit_interval(ctx, param, value):
+    """Scores lie in 0..1, and a NaN or infinite threshold would silently match nothing."""
+    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        raise click.BadParameter("must be a finite number between 0 and 1")
+    return value
 
 
 @click.group()
@@ -54,19 +193,43 @@ def cli():
 def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidian_path, config, verbose):
     """Analyze chat history files"""
     
-    # Load configuration
-    config_data = load_config(config)
-    
     # Handle Obsidian shortcut
     if obsidian:
         exporter = 'obsidian'
         if obsidian_path:
             output = obsidian_path
+
+    # Load configuration
+    try:
+        config_data = load_config(config)
+        analyzer_config = config_section(config_section(config_data, 'analysis'), analyzer)
+        exporter_config = dict(config_section(config_section(config_data, 'exporters'), exporter))
+        if exporter == 'obsidian':
+            exporter_config.update(config_section(config_data, 'obsidian'))
+    except ConfigError:
+        click.echo(CONFIG_REJECTED, err=True)
+        sys.exit(1)
     
     # Validate inputs
     if len(input_files) != len(platforms):
         click.echo("Error: Number of input files must match number of platforms", err=True)
-        return
+        sys.exit(1)
+
+    try:
+        analyzer_instance = get_analyzer(analyzer)
+        analyzer_instance.validate_config(analyzer_config)
+    except ValueError as e:
+        click.echo(f"Error during analysis: {e}", err=True)
+        sys.exit(1)
+
+    exporter_instance = None
+    if output:
+        try:
+            exporter_instance = get_exporter(exporter)
+            exporter_instance.validate_config(exporter_config)
+        except ValueError as e:
+            click.echo(f"Error during export: {e}", err=True)
+            sys.exit(1)
     
     # Parse all conversations
     all_conversations = []
@@ -88,44 +251,51 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
     
     if not all_conversations:
         click.echo("No conversations found to analyze", err=True)
-        return
+        sys.exit(1)
     
     click.echo(f"\nAnalyzing {len(all_conversations)} conversations...")
     
     # Run analysis
-    analyzer_config = config_data.get('analysis', {}).get(analyzer, {})
-    analyzer_instance = get_analyzer(analyzer)
-    
     try:
         result = analyzer_instance.analyze(all_conversations, analyzer_config)
         click.echo(f"Found {len(result.unfinished_projects)} unfinished projects")
-    except Exception as e:
+    except ValueError as e:
+        # Configuration errors are raised with a fixed, pattern-free message,
+        # so they are safe to show to the user.
         click.echo(f"Error during analysis: {e}", err=True)
+        sys.exit(1)
+    except Exception:
+        # Never print the raw exception: it can carry attacker-influenced text
+        # (e.g. from configured keyword patterns) straight to the terminal.
+        click.echo("Error during analysis: the analysis could not be completed", err=True)
         if verbose:
             import traceback
             traceback.print_exc()
-        return
+        sys.exit(1)
     
     # Export results
     if output:
         click.echo(f"\nExporting results to {output}...")
         
-        exporter_config = config_data.get('exporters', {}).get(exporter, {})
         if exporter == 'obsidian':
-            exporter_config.update(config_data.get('obsidian', {}))
             if not output.exists() or not output.is_dir():
                 click.echo(f"Warning: Obsidian path should be a directory. Creating: {output}")
                 output.mkdir(parents=True, exist_ok=True)
         
         try:
-            exporter_instance = get_exporter(exporter)
+            if exporter_instance is None:
+                exporter_instance = get_exporter(exporter)
             output_path = exporter_instance.export(result, output, exporter_config)
             click.echo(f"✓ Exported to {output_path}")
-        except Exception as e:
+        except ValueError as e:
             click.echo(f"Error during export: {e}", err=True)
+            sys.exit(1)
+        except Exception:
+            click.echo("Error during export: the export could not be completed", err=True)
             if verbose:
                 import traceback
                 traceback.print_exc()
+            sys.exit(1)
     else:
         # Print summary
         click.echo("\n=== Analysis Summary ===")
@@ -147,8 +317,8 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
               help='Input file(s) to analyze')
 @click.option('--platform', '-p', 'platforms', multiple=True, required=True,
               help='Platform for each input file')
-@click.option('--min-priority', type=float, default=0.0,
-              help='Minimum priority score to show')
+@click.option('--min-priority', type=float, default=0.0, callback=_unit_interval,
+              help='Minimum priority score to show (0.0-1.0)')
 @click.option('--format', '-f', type=click.Choice(['table', 'list', 'json']), default='table',
               help='Output format')
 def list_unfinished(input_files, platforms, min_priority, format):
@@ -238,8 +408,10 @@ def init_config(output):
         }
     }
     
-    with open(output, 'w') as f:
-        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+    try:
+        write_text_file(output, yaml.dump(config, default_flow_style=False, sort_keys=False))
+    except UnsafeDestinationError as e:
+        raise click.ClickException(str(e))
     
     click.echo(f"Created configuration file: {output}")
 
