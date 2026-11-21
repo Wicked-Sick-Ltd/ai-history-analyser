@@ -15,7 +15,7 @@ from .parsers import get_parser
 from .analyzers import get_analyzer
 from .exporters import get_exporter
 from .models import Conversation, Platform
-from .safe_io import write_text_file
+from .fileio import UnsafeDestinationError, write_text_file
 
 
 # The root collection is depth 1; scalars do not add a level.
@@ -408,7 +408,10 @@ def init_config(output):
         }
     }
     
-    write_text_file(output, yaml.dump(config, default_flow_style=False, sort_keys=False))
+    try:
+        write_text_file(output, yaml.dump(config, default_flow_style=False, sort_keys=False))
+    except UnsafeDestinationError as e:
+        raise click.ClickException(str(e))
     
     click.echo(f"Created configuration file: {output}")
 
