@@ -3,7 +3,8 @@
 import json
 import re
 from abc import ABC, abstractmethod
-from typing import Any, List
+from datetime import datetime
+from typing import Any, List, Optional
 from pathlib import Path
 
 from ..models import Conversation, Platform
@@ -48,6 +49,11 @@ def replace_lone_surrogates(data: Any) -> Any:
     return data
 
 
+# dateutil's cost grows quadratically with the length of a numeric token, so
+# export fields longer than any real timestamp are never handed to it.
+MAX_TIMESTAMP_LENGTH = 64
+
+
 class BaseParser(ABC):
     """Base class for platform-specific parsers"""
     
@@ -89,4 +95,30 @@ class BaseParser(ABC):
             return file_path.exists() and file_path.is_file()
         except Exception:
             return False
+
+    def _parse_timestamp(self, value: Any) -> Optional[datetime]:
+        """Parse timestamp from various formats"""
+        if not value:
+            return None
+
+        if isinstance(value, (int, float)):
+            # Unix timestamp
+            try:
+                return datetime.fromtimestamp(value)
+            except (ValueError, OSError):
+                return None
+
+        if isinstance(value, str):
+            if len(value) > MAX_TIMESTAMP_LENGTH:
+                return None
+            try:
+                return datetime.fromisoformat(value.replace('Z', '+00:00'))
+            except ValueError:
+                try:
+                    from dateutil.parser import parse as date_parse
+                    return date_parse(value)
+                except Exception:
+                    return None
+
+        return None
 
