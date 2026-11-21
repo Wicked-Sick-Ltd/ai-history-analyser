@@ -1,5 +1,6 @@
 """Obsidian markdown exporter"""
 
+import io
 import os
 from pathlib import Path
 from datetime import datetime
@@ -7,6 +8,7 @@ from typing import Dict, Any
 
 from .base import BaseExporter
 from . import _safe_fs
+from ..fileio import write_text_in_dir
 from ..models import AnalysisResult, UnfinishedProject
 
 
@@ -16,27 +18,35 @@ class ObsidianExporter(BaseExporter):
     def get_name(self) -> str:
         return "obsidian"
     
+    def validate_config(self, config: dict) -> dict:
+        """Check the folder setting and return a normalized copy"""
+        config = super().validate_config(config)
+        if 'folder' in config:
+            folder = config['folder']
+            if not isinstance(folder, str):
+                raise ValueError("folder must be a string")
+            if '\x00' in folder:
+                raise ValueError("folder must not contain a null character")
+        return config
+
     def export(self, result: AnalysisResult, output_path: Path, config: dict = None) -> Path:
         """Export to Obsidian format"""
-        config = config or {}
+        config = self.validate_config(config if config is not None else {})
         output_path = Path(output_path)
         
         # Determine output directory
         if output_path.is_dir():
-            vault_path = output_path
             folder = config.get('folder', 'AI Projects')
-            output_dir = vault_path / folder
+            output_dir = output_path / folder
         else:
             output_dir = output_path.parent
-        
+
         # Bind the export directory once, refusing any symlinked component, and
-        # write every note relative to that descriptor so a directory swapped in
-        # afterwards cannot receive the chat excerpts.
+        # write every note relative to that descriptor. Each note is a new
+        # regular file; a symlink or other non-regular name is refused.
         dir_fd = _safe_fs.makedirs_secure(output_dir)
         try:
             index_path = self._create_index(result, dir_fd, output_dir, config)
-
-            # Create individual project files
             for project in result.unfinished_projects:
                 self._create_project_file(project, dir_fd, output_dir, config)
         finally:
@@ -47,9 +57,8 @@ class ObsidianExporter(BaseExporter):
     def _create_index(self, result: AnalysisResult, dir_fd: int, output_dir: Path, config: dict) -> Path:
         """Create the main index file"""
         index_name = "Unfinished Projects Index.md"
-        index_path = output_dir / index_name
         
-        with _safe_fs.open_write_relative(dir_fd, index_name) as f:
+        with io.StringIO() as f:
             f.write("# Unfinished Projects Index\n\n")
             f.write(f"*Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n\n")
             f.write(f"**Platform:** {result.platform.value.title()}\n")
@@ -87,15 +96,17 @@ class ObsidianExporter(BaseExporter):
                 
                 f.write(f"\n{project.description[:200]}...\n\n")
                 f.write("---\n\n")
+
+            write_text_in_dir(dir_fd, output_dir, index_name, f.getvalue())
         
-        return index_path
+        return output_dir / index_name
     
     def _create_project_file(self, project: UnfinishedProject, dir_fd: int, output_dir: Path, config: dict):
         """Create an individual project file"""
         filename = self._get_project_filename(project)
         note_name = f"{filename}.md"
         
-        with _safe_fs.open_write_relative(dir_fd, note_name) as f:
+        with io.StringIO() as f:
             f.write(f"# {project.title}\n\n")
             
             # Metadata
@@ -144,6 +155,8 @@ class ObsidianExporter(BaseExporter):
             f.write(f"priority: {project.priority_score:.2f}\n")
             f.write(f"confidence: {project.confidence:.2f}\n")
             f.write("```\n")
+
+            write_text_in_dir(dir_fd, output_dir, note_name, f.getvalue())
     
     def _get_project_filename(self, project: UnfinishedProject) -> str:
         """Generate a safe filename for the project"""
@@ -153,4 +166,3 @@ class ObsidianExporter(BaseExporter):
         filename = re.sub(r'[-\s]+', '-', filename)
         filename = filename[:50]  # Limit length
         return filename or f"project-{project.id}"
-

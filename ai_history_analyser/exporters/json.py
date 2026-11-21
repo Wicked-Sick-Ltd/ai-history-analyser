@@ -7,6 +7,7 @@ from typing import Dict, Any
 
 from .base import BaseExporter
 from . import _safe_fs
+from ..fileio import write_text_in_dir
 from ..models import AnalysisResult
 
 
@@ -20,8 +21,13 @@ class JSONExporter(BaseExporter):
         """Export to JSON format"""
         config = config or {}
         output_path = Path(output_path)
-        
-        # Convert to dict
+        if output_path.is_dir():
+            directory = output_path
+            name = "analysis_results.json"
+        else:
+            directory = output_path.parent
+            name = output_path.name
+
         data = {
             'platform': result.platform.value,
             'conversations_analyzed': result.conversations_analyzed,
@@ -45,20 +51,14 @@ class JSONExporter(BaseExporter):
             ],
             'metadata': result.metadata
         }
-        
-        # Write JSON without following a symlink out of the requested location.
-        if output_path.is_dir():
-            output_file = output_path / "analysis_results.json"
-            dir_fd = _safe_fs.open_dir_secure(output_path)
-            try:
-                with _safe_fs.open_write_relative(dir_fd, "analysis_results.json") as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
-            finally:
-                os.close(dir_fd)
-        else:
-            output_file = output_path
-            with _safe_fs.open_write_file_secure(output_path) as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-        
-        return output_file
 
+        # The directory is bound without following a symlink component. The
+        # final name is then written as a new regular file, or refused when it
+        # is a symlink, FIFO, device, or directory.
+        dir_fd = _safe_fs.open_dir_secure(directory)
+        try:
+            return write_text_in_dir(
+                dir_fd, directory, name, json.dumps(data, indent=2, ensure_ascii=False)
+            )
+        finally:
+            os.close(dir_fd)

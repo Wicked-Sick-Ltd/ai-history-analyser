@@ -1,5 +1,6 @@
 """Command-line interface for AI History Analyser"""
 
+import math
 import os
 import stat
 import sys
@@ -15,7 +16,7 @@ from .analyzers import get_analyzer
 from .exporters import get_exporter
 from .exporters import _safe_fs
 from .models import Conversation, Platform
-from .safe_io import write_text_file
+from .fileio import UnsafeDestinationError, write_text_file
 
 
 # The root collection is depth 1; scalars do not add a level.
@@ -61,36 +62,44 @@ class _BoundedLoader(yaml.SafeLoader):
 
 
 def _read_config_bytes(config_path: Path, implicit: bool) -> Optional[bytes]:
-    """Read at most MAX_CONFIG_BYTES + 1 bytes, or None if the file is missing.
+    """Read at most MAX_CONFIG_BYTES + 1 bytes, or None if it cannot be used.
 
-    The implicit path must be a regular file. It is opened without following a
-    final symlink and without blocking on a fifo, and the opened descriptor is
-    checked to be the same regular file that lstat saw.
+    None means the path is missing or is not a regular file opened without
+    blocking. Implicit config.yaml is not followed when it is a symlink.
+    An explicit path may be followed, and the descriptor is kept only when it
+    is a regular file, so a FIFO or a lied stat is never read.
     """
-    flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, 'O_BINARY', 0)
+        | getattr(os, 'O_NONBLOCK', 0)
+        | getattr(os, 'O_CLOEXEC', 0)
+        | getattr(os, 'O_NOCTTY', 0)
+    )
     expected = None
     if implicit:
-        flags |= getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+        flags |= getattr(os, 'O_NOFOLLOW', 0)
         try:
             expected = os.lstat(config_path)
         except FileNotFoundError:
             return None
         if not stat.S_ISREG(expected.st_mode):
-            raise ConfigError("implicit configuration is not a regular file")
+            return None
 
     try:
         fd = os.open(config_path, flags)
-    except FileNotFoundError:
-        if implicit:
-            raise ConfigError("implicit configuration changed while opening") from None
+    except OSError:
         return None
 
     try:
-        if expected is not None:
-            opened = os.fstat(fd)
-            if (not stat.S_ISREG(opened.st_mode)
-                    or (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino)):
-                raise ConfigError("implicit configuration changed while opening")
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            return None
+        if (
+            expected is not None
+            and (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino)
+        ):
+            return None
         with os.fdopen(fd, 'rb') as f:
             fd = None
             return f.read(MAX_CONFIG_BYTES + 1)
@@ -115,8 +124,9 @@ def _parse_config(data: bytes) -> dict:
 def load_config(config_path: Path = None) -> dict:
     """Load configuration from file.
 
-    Raises ConfigError if the file cannot be read or parsed within the limits.
-    The error never carries bytes from the file.
+    A missing path, or one that is not a regular file, yields an empty
+    mapping and does not block. A regular file that cannot be parsed within
+    the limits raises ConfigError. The error never carries bytes from the file.
     """
     implicit = config_path is None
     if implicit:
@@ -144,6 +154,13 @@ def config_section(mapping: dict, key) -> dict:
         return {}
     if not isinstance(value, dict):
         raise ConfigError("configuration section must be a mapping")
+    return value
+
+
+def _unit_interval(ctx, param, value):
+    """Scores lie in 0..1, and a NaN or infinite threshold would silently match nothing."""
+    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        raise click.BadParameter("must be a finite number between 0 and 1")
     return value
 
 
@@ -197,7 +214,23 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
     # Validate inputs
     if len(input_files) != len(platforms):
         click.echo("Error: Number of input files must match number of platforms", err=True)
-        return
+        sys.exit(1)
+
+    try:
+        analyzer_instance = get_analyzer(analyzer)
+        analyzer_instance.validate_config(analyzer_config)
+    except ValueError as e:
+        click.echo(f"Error during analysis: {e}", err=True)
+        sys.exit(1)
+
+    exporter_instance = None
+    if output:
+        try:
+            exporter_instance = get_exporter(exporter)
+            exporter_instance.validate_config(exporter_config)
+        except ValueError as e:
+            click.echo(f"Error during export: {e}", err=True)
+            sys.exit(1)
     
     # Parse all conversations
     all_conversations = []
@@ -219,13 +252,11 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
     
     if not all_conversations:
         click.echo("No conversations found to analyze", err=True)
-        return
+        sys.exit(1)
     
     click.echo(f"\nAnalyzing {len(all_conversations)} conversations...")
     
     # Run analysis
-    analyzer_instance = get_analyzer(analyzer)
-    
     try:
         result = analyzer_instance.analyze(all_conversations, analyzer_config)
         click.echo(f"Found {len(result.unfinished_projects)} unfinished projects")
@@ -233,7 +264,7 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
         # Configuration errors are raised with a fixed, pattern-free message,
         # so they are safe to show to the user.
         click.echo(f"Error during analysis: {e}", err=True)
-        return
+        sys.exit(1)
     except Exception:
         # Never print the raw exception: it can carry attacker-influenced text
         # (e.g. from configured keyword patterns) straight to the terminal.
@@ -241,7 +272,7 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
         if verbose:
             import traceback
             traceback.print_exc()
-        return
+        sys.exit(1)
     
     # Export results
     if output:
@@ -257,14 +288,19 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
                     return
         
         try:
-            exporter_instance = get_exporter(exporter)
+            if exporter_instance is None:
+                exporter_instance = get_exporter(exporter)
             output_path = exporter_instance.export(result, output, exporter_config)
             click.echo(f"✓ Exported to {output_path}")
-        except Exception as e:
+        except ValueError as e:
             click.echo(f"Error during export: {e}", err=True)
+            sys.exit(1)
+        except Exception:
+            click.echo("Error during export: the export could not be completed", err=True)
             if verbose:
                 import traceback
                 traceback.print_exc()
+            sys.exit(1)
     else:
         # Print summary
         click.echo("\n=== Analysis Summary ===")
@@ -286,8 +322,8 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
               help='Input file(s) to analyze')
 @click.option('--platform', '-p', 'platforms', multiple=True, required=True,
               help='Platform for each input file')
-@click.option('--min-priority', type=float, default=0.0,
-              help='Minimum priority score to show')
+@click.option('--min-priority', type=float, default=0.0, callback=_unit_interval,
+              help='Minimum priority score to show (0.0-1.0)')
 @click.option('--format', '-f', type=click.Choice(['table', 'list', 'json']), default='table',
               help='Output format')
 def list_unfinished(input_files, platforms, min_priority, format):
@@ -377,7 +413,10 @@ def init_config(output):
         }
     }
     
-    write_text_file(output, yaml.dump(config, default_flow_style=False, sort_keys=False))
+    try:
+        write_text_file(output, yaml.dump(config, default_flow_style=False, sort_keys=False))
+    except UnsafeDestinationError as e:
+        raise click.ClickException(str(e))
     
     click.echo(f"Created configuration file: {output}")
 
