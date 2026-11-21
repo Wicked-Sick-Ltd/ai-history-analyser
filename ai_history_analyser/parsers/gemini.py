@@ -3,7 +3,6 @@
 import json
 from pathlib import Path
 from typing import List, Dict, Any
-from datetime import datetime
 
 from .base import BaseParser
 from ..models import Conversation, Message, Platform
@@ -108,27 +107,4 @@ class GeminiParser(BaseParser):
             timestamp=timestamp,
             metadata=data
         )
-    
-    def _parse_timestamp(self, value: Any) -> datetime:
-        """Parse timestamp from various formats"""
-        if not value:
-            return None
-        
-        if isinstance(value, (int, float)):
-            try:
-                return datetime.fromtimestamp(value)
-            except (ValueError, OSError):
-                return None
-        
-        if isinstance(value, str):
-            try:
-                return datetime.fromisoformat(value.replace('Z', '+00:00'))
-            except ValueError:
-                try:
-                    from dateutil.parser import parse as date_parse
-                    return date_parse(value)
-                except Exception:
-                    return None
-        
-        return None
 
