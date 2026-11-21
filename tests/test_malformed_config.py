@@ -1,10 +1,11 @@
 """Spec for analyze's handling of config.yaml.
 
-These tests invoke the real ``analyze`` command. They fail while a malformed
-document is still used as nested settings: a non-mapping crashes with an
-uncaught AttributeError after the chat export has been parsed, and a
-wrong-typed keyword or minimum confidence is printed and then reported as
-success (exit code 0) with no export.
+These tests invoke the real ``analyze`` command. A document that is not a
+mapping is rejected. A missing or null ``analysis``, ``exporters``, or
+``obsidian`` value is an empty mapping. ``keywords`` must be a list of
+strings and ``min_confidence`` a non-boolean number. Analysis or export
+failure exits non-zero, and a rejected run writes no export and creates
+no Obsidian vault.
 
 Not covered here, because those commands never load config.yaml:
 
@@ -14,11 +15,9 @@ Not covered here, because those commands never load config.yaml:
 
 Also left untested: a wrong-typed ``exporters.json`` value. The JSON exporter
 does not read its config mapping, so that value never changes the run.
-A syntax error in ``config.yaml`` is outside the rejection contract above.
-``load_config`` calls ``yaml.safe_load`` before the chat-export handler and
-does not catch it, so the command raises instead of that handler's
-print-and-return path. The chat handler reports the chat-file path and
-returns success only when no conversations remain.
+A syntax error in ``config.yaml`` is rejected by ``load_config`` before the
+chat-export handler. It is not reported as ``Error parsing <chat file>``,
+and it does not take that handler's empty-conversation success return.
 ``test_config_syntax_error_is_not_a_chat_parse_failure`` locks that split.
 """
 
@@ -360,8 +359,7 @@ def test_config_syntax_error_is_not_a_chat_parse_failure(tmp_path):
     """load_config parses config.yaml before the chat-export handler.
 
     A syntax error must not be reported as ``Error parsing <chat file>`` and
-    must not take the empty-conversation success return. The clean-rejection
-    contract above does not cover this path.
+    must not take the empty-conversation success return.
     """
     output = tmp_path / "results.json"
     chat = _write_chat(tmp_path)
