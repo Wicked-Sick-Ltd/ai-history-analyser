@@ -1,5 +1,6 @@
 """Command-line interface for AI History Analyser"""
 
+import math
 import os
 import stat
 import sys
@@ -146,6 +147,13 @@ def config_section(mapping: dict, key) -> dict:
     return value
 
 
+def _unit_interval(ctx, param, value):
+    """Scores lie in 0..1, and a NaN or infinite threshold would silently match nothing."""
+    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        raise click.BadParameter("must be a finite number between 0 and 1")
+    return value
+
+
 @click.group()
 @click.version_option()
 def cli():
@@ -232,7 +240,7 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
         # Configuration errors are raised with a fixed, pattern-free message,
         # so they are safe to show to the user.
         click.echo(f"Error during analysis: {e}", err=True)
-        return
+        sys.exit(1)
     except Exception:
         # Never print the raw exception: it can carry attacker-influenced text
         # (e.g. from configured keyword patterns) straight to the terminal.
@@ -240,7 +248,7 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
         if verbose:
             import traceback
             traceback.print_exc()
-        return
+        sys.exit(1)
     
     # Export results
     if output:
@@ -281,8 +289,8 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
               help='Input file(s) to analyze')
 @click.option('--platform', '-p', 'platforms', multiple=True, required=True,
               help='Platform for each input file')
-@click.option('--min-priority', type=float, default=0.0,
-              help='Minimum priority score to show')
+@click.option('--min-priority', type=float, default=0.0, callback=_unit_interval,
+              help='Minimum priority score to show (0.0-1.0)')
 @click.option('--format', '-f', type=click.Choice(['table', 'list', 'json']), default='table',
               help='Output format')
 def list_unfinished(input_files, platforms, min_priority, format):

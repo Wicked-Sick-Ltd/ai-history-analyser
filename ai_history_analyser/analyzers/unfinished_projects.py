@@ -1,5 +1,6 @@
 """Analyzer for detecting unfinished projects"""
 
+import math
 import re
 from typing import List, Dict, Any
 from datetime import datetime
@@ -7,6 +8,29 @@ import hashlib
 
 from .base import BaseAnalyzer
 from ..models import Conversation, UnfinishedProject, AnalysisResult, Platform
+
+
+def _invalid_min_confidence(value: Any) -> ValueError:
+    try:
+        shown = repr(value)
+    except Exception:
+        shown = f"<{type(value).__name__}>"
+    if len(shown) > 40:
+        shown = shown[:37] + "..."
+    return ValueError(f"min_confidence must be a finite number between 0 and 1, got {shown}")
+
+
+def _validate_min_confidence(value: Any) -> float:
+    """Return value as a plain float, or raise ValueError unless it is a finite number in [0, 1]."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _invalid_min_confidence(value)
+    try:
+        threshold = float(value)
+    except (OverflowError, TypeError, ValueError):
+        raise _invalid_min_confidence(value) from None
+    if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise _invalid_min_confidence(value)
+    return threshold
 
 
 def _compile_keywords(keywords: List[str]) -> List["re.Pattern"]:
@@ -70,7 +94,7 @@ class UnfinishedProjectsAnalyzer(BaseAnalyzer):
             min_confidence: Minimum confidence threshold (0.0-1.0)
         """
         self.keywords = keywords or self.DEFAULT_KEYWORDS
-        self.min_confidence = min_confidence
+        self.min_confidence = _validate_min_confidence(min_confidence)
         self.compiled_patterns = _compile_keywords(self.keywords)
     
     def get_name(self) -> str:
@@ -80,12 +104,16 @@ class UnfinishedProjectsAnalyzer(BaseAnalyzer):
         """Analyze conversations for unfinished projects"""
         config = config or {}
         
-        # Override settings from config
+        # Override settings from config. The threshold is read once and the
+        # validated float is what filters hits.
+        if 'min_confidence' in config:
+            min_confidence = _validate_min_confidence(config['min_confidence'])
+        else:
+            min_confidence = _validate_min_confidence(self.min_confidence)
+        self.min_confidence = min_confidence
         if 'keywords' in config:
             self.keywords = config['keywords']
             self.compiled_patterns = _compile_keywords(self.keywords)
-        if 'min_confidence' in config:
-            self.min_confidence = config['min_confidence']
         
         unfinished_projects = []
         platform = None
@@ -94,7 +122,7 @@ class UnfinishedProjectsAnalyzer(BaseAnalyzer):
             if not platform:
                 platform = conv.platform
             
-            projects = self._analyze_conversation(conv)
+            projects = self._analyze_conversation(conv, min_confidence)
             unfinished_projects.extend(projects)
         
         # Calculate priorities
@@ -110,7 +138,7 @@ class UnfinishedProjectsAnalyzer(BaseAnalyzer):
             unfinished_projects=unfinished_projects
         )
     
-    def _analyze_conversation(self, conversation: Conversation) -> List[UnfinishedProject]:
+    def _analyze_conversation(self, conversation: Conversation, min_confidence: float) -> List[UnfinishedProject]:
         """Analyze a single conversation for unfinished projects"""
         projects = []
         
@@ -138,7 +166,7 @@ class UnfinishedProjectsAnalyzer(BaseAnalyzer):
         for i, group in enumerate(grouped_matches):
             confidence = self._calculate_confidence(group, full_text)
             
-            if confidence >= self.min_confidence:
+            if confidence >= min_confidence:
                 project = self._create_project(
                     conversation=conversation,
                     matches=group,
