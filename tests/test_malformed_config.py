@@ -14,8 +14,12 @@ Not covered here, because those commands never load config.yaml:
 
 Also left untested: a wrong-typed ``exporters.json`` value. The JSON exporter
 does not read its config mapping, so that value never changes the run.
-A parse error inside ``analyze`` uses the same "print and return" exit as a
-failed analysis, but the reported input is config.yaml, not the chat file.
+A syntax error in ``config.yaml`` is outside the rejection contract above.
+``load_config`` calls ``yaml.safe_load`` before the chat-export handler and
+does not catch it, so the command raises instead of that handler's
+print-and-return path. The chat handler reports the chat-file path and
+returns success only when no conversations remain.
+``test_config_syntax_error_is_not_a_chat_parse_failure`` locks that split.
 """
 
 import json
@@ -349,6 +353,27 @@ def test_export_io_failure_exits_nonzero_and_writes_nothing(tmp_path):
     assert "Traceback (most recent call last)" not in text
     assert "✓ Exported" not in text
     assert "error" in text.lower()
+    assert not output.exists()
+
+
+def test_config_syntax_error_is_not_a_chat_parse_failure(tmp_path):
+    """load_config parses config.yaml before the chat-export handler.
+
+    A syntax error must not be reported as ``Error parsing <chat file>`` and
+    must not take the empty-conversation success return. The clean-rejection
+    contract above does not cover this path.
+    """
+    output = tmp_path / "results.json"
+    chat = _write_chat(tmp_path)
+    (tmp_path / "config.yaml").write_text("analysis: [\n", encoding="utf-8")
+    result = _run_analyze(
+        tmp_path,
+        ["--input", str(chat), "--platform", "chatgpt", "--output", str(output)],
+    )
+    text = _combined(result)
+    assert result.returncode != 0, text
+    assert f"Error parsing {chat}" not in text
+    assert "No conversations found to analyze" not in text
     assert not output.exists()
 
 
