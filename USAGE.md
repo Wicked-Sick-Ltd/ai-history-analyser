@@ -135,3 +135,9 @@ Different platforms may export in slightly different formats. If parsing fails:
 
 Exports sometimes contain broken characters, such as half of an emoji's UTF-16 surrogate pair (for example `\ud800` on its own). The parsers replace these with `�` (U+FFFD) when loading the file, so the rest of the results still print and export. Terminal output also replaces any character your terminal's encoding cannot show.
 
+### "Refusing to write ...: it is not a regular file"
+
+Exports and `init-config` replace existing output files instead of writing through them. They
+refuse to write when the output name is a symlink, named pipe, device or directory. Remove or
+rename that entry, or choose a different output path.
+

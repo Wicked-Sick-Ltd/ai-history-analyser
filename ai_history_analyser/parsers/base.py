@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, List, Optional
 from pathlib import Path
 
+from ..fileutils import open_regular_for_read
 from ..models import Conversation, Platform
 
 _LONE_SURROGATE = re.compile('[\ud800-\udfff]')
@@ -77,8 +78,11 @@ class BaseParser(ABC):
         pass
     
     def _load_json(self, file_path: Path) -> Any:
-        """Load a JSON export with lone surrogates replaced"""
-        with open(file_path, 'r', encoding='utf-8') as f:
+        """Load a JSON export from a regular file, with lone surrogates replaced.
+
+        The open does not block on a FIFO or other non-regular file.
+        """
+        with open_regular_for_read(file_path, encoding='utf-8') as f:
             return replace_lone_surrogates(json.load(f))
 
     def validate(self, file_path: Path) -> bool:
