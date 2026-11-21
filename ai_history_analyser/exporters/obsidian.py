@@ -1,12 +1,14 @@
 """Obsidian markdown exporter"""
 
 import io
+import os
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any
 
 from .base import BaseExporter
-from ..fileio import write_text_file
+from . import _safe_fs
+from ..fileio import write_text_in_dir
 from ..models import AnalysisResult, UnfinishedProject
 
 
@@ -30,29 +32,31 @@ class ObsidianExporter(BaseExporter):
     def export(self, result: AnalysisResult, output_path: Path, config: dict = None) -> Path:
         """Export to Obsidian format"""
         config = self.validate_config(config if config is not None else {})
+        output_path = Path(output_path)
         
         # Determine output directory
         if output_path.is_dir():
-            vault_path = output_path
             folder = config.get('folder', 'AI Projects')
-            output_dir = vault_path / folder
-            output_dir.mkdir(parents=True, exist_ok=True)
+            output_dir = output_path / folder
         else:
             output_dir = output_path.parent
-            output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Create main index file
-        index_path = self._create_index(result, output_dir, config)
-        
-        # Create individual project files
-        for project in result.unfinished_projects:
-            self._create_project_file(project, output_dir, config)
+
+        # Bind the export directory once, refusing any symlinked component, and
+        # write every note relative to that descriptor. Each note is a new
+        # regular file; a symlink or other non-regular name is refused.
+        dir_fd = _safe_fs.makedirs_secure(output_dir)
+        try:
+            index_path = self._create_index(result, dir_fd, output_dir, config)
+            for project in result.unfinished_projects:
+                self._create_project_file(project, dir_fd, output_dir, config)
+        finally:
+            os.close(dir_fd)
         
         return index_path
     
-    def _create_index(self, result: AnalysisResult, output_dir: Path, config: dict) -> Path:
+    def _create_index(self, result: AnalysisResult, dir_fd: int, output_dir: Path, config: dict) -> Path:
         """Create the main index file"""
-        index_path = output_dir / "Unfinished Projects Index.md"
+        index_name = "Unfinished Projects Index.md"
         
         with io.StringIO() as f:
             f.write("# Unfinished Projects Index\n\n")
@@ -93,14 +97,14 @@ class ObsidianExporter(BaseExporter):
                 f.write(f"\n{project.description[:200]}...\n\n")
                 f.write("---\n\n")
 
-            write_text_file(index_path, f.getvalue())
+            write_text_in_dir(dir_fd, output_dir, index_name, f.getvalue())
         
-        return index_path
+        return output_dir / index_name
     
-    def _create_project_file(self, project: UnfinishedProject, output_dir: Path, config: dict):
+    def _create_project_file(self, project: UnfinishedProject, dir_fd: int, output_dir: Path, config: dict):
         """Create an individual project file"""
         filename = self._get_project_filename(project)
-        file_path = output_dir / f"{filename}.md"
+        note_name = f"{filename}.md"
         
         with io.StringIO() as f:
             f.write(f"# {project.title}\n\n")
@@ -152,7 +156,7 @@ class ObsidianExporter(BaseExporter):
             f.write(f"confidence: {project.confidence:.2f}\n")
             f.write("```\n")
 
-            write_text_file(file_path, f.getvalue())
+            write_text_in_dir(dir_fd, output_dir, note_name, f.getvalue())
     
     def _get_project_filename(self, project: UnfinishedProject) -> str:
         """Generate a safe filename for the project"""
@@ -162,4 +166,3 @@ class ObsidianExporter(BaseExporter):
         filename = re.sub(r'[-\s]+', '-', filename)
         filename = filename[:50]  # Limit length
         return filename or f"project-{project.id}"
-

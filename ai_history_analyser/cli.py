@@ -14,6 +14,7 @@ from tqdm import tqdm
 from .parsers import get_parser
 from .analyzers import get_analyzer
 from .exporters import get_exporter
+from .exporters import _safe_fs
 from .models import Conversation, Platform
 from .fileio import UnsafeDestinationError, write_text_file
 
@@ -280,7 +281,11 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
         if exporter == 'obsidian':
             if not output.exists() or not output.is_dir():
                 click.echo(f"Warning: Obsidian path should be a directory. Creating: {output}")
-                output.mkdir(parents=True, exist_ok=True)
+                try:
+                    os.close(_safe_fs.makedirs_secure(output))
+                except OSError as e:
+                    click.echo(f"Error during export: {e}", err=True)
+                    return
         
         try:
             if exporter_instance is None:

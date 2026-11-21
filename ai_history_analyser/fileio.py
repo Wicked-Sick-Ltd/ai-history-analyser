@@ -18,6 +18,29 @@ class UnsafeDestinationError(OSError):
     """The output name is held by something other than a regular file"""
 
 
+def write_text_in_dir(
+    dir_fd: int, directory: Path, name: str, text: str, encoding: str = "utf-8"
+) -> Path:
+    """Write ``text`` as a new regular file named ``name`` inside ``dir_fd``.
+
+    ``directory`` is the path that ``dir_fd`` was opened on. It is used for the
+    returned path and for error text. The bytes are created and renamed
+    relative to ``dir_fd``, so a symlink swapped into the directory path cannot
+    redirect them. A symlink, FIFO, device, or directory already at ``name``
+    is refused and left in place.
+    """
+    if (
+        not name
+        or name in (".", "..")
+        or os.sep in name
+        or (os.altsep and os.altsep in name)
+    ):
+        raise ValueError(f"invalid output name: {name!r}")
+    path = Path(directory) / name
+    _write(path, text.encode(encoding), dir_fd, name)
+    return path
+
+
 def write_text_file(path: Path, text: str, encoding: str = "utf-8") -> Path:
     """Write ``text`` to ``path`` as a new regular file.
 
