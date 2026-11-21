@@ -61,36 +61,44 @@ class _BoundedLoader(yaml.SafeLoader):
 
 
 def _read_config_bytes(config_path: Path, implicit: bool) -> Optional[bytes]:
-    """Read at most MAX_CONFIG_BYTES + 1 bytes, or None if the file is missing.
+    """Read at most MAX_CONFIG_BYTES + 1 bytes, or None if it cannot be used.
 
-    The implicit path must be a regular file. It is opened without following a
-    final symlink and without blocking on a fifo, and the opened descriptor is
-    checked to be the same regular file that lstat saw.
+    None means the path is missing or is not a regular file opened without
+    blocking. Implicit config.yaml is not followed when it is a symlink.
+    An explicit path may be followed, and the descriptor is kept only when it
+    is a regular file, so a FIFO or a lied stat is never read.
     """
-    flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, 'O_BINARY', 0)
+        | getattr(os, 'O_NONBLOCK', 0)
+        | getattr(os, 'O_CLOEXEC', 0)
+        | getattr(os, 'O_NOCTTY', 0)
+    )
     expected = None
     if implicit:
-        flags |= getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+        flags |= getattr(os, 'O_NOFOLLOW', 0)
         try:
             expected = os.lstat(config_path)
         except FileNotFoundError:
             return None
         if not stat.S_ISREG(expected.st_mode):
-            raise ConfigError("implicit configuration is not a regular file")
+            return None
 
     try:
         fd = os.open(config_path, flags)
-    except FileNotFoundError:
-        if implicit:
-            raise ConfigError("implicit configuration changed while opening") from None
+    except OSError:
         return None
 
     try:
-        if expected is not None:
-            opened = os.fstat(fd)
-            if (not stat.S_ISREG(opened.st_mode)
-                    or (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino)):
-                raise ConfigError("implicit configuration changed while opening")
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            return None
+        if (
+            expected is not None
+            and (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino)
+        ):
+            return None
         with os.fdopen(fd, 'rb') as f:
             fd = None
             return f.read(MAX_CONFIG_BYTES + 1)
@@ -115,8 +123,9 @@ def _parse_config(data: bytes) -> dict:
 def load_config(config_path: Path = None) -> dict:
     """Load configuration from file.
 
-    Raises ConfigError if the file cannot be read or parsed within the limits.
-    The error never carries bytes from the file.
+    A missing path, or one that is not a regular file, yields an empty
+    mapping and does not block. A regular file that cannot be parsed within
+    the limits raises ConfigError. The error never carries bytes from the file.
     """
     implicit = config_path is None
     if implicit:

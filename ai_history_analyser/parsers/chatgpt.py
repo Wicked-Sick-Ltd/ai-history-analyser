@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import List, Dict, Any
 
 from .base import BaseParser
+from ..fileutils import open_regular_for_read
 from ..models import Conversation, Message, Platform
 
 
@@ -17,7 +18,7 @@ class ChatGPTParser(BaseParser):
     
     def parse(self, file_path: Path) -> List[Conversation]:
         """Parse ChatGPT export file"""
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open_regular_for_read(file_path, encoding='utf-8') as f:
             data = json.load(f)
         
         conversations = []
