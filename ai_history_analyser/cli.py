@@ -213,7 +213,23 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
     # Validate inputs
     if len(input_files) != len(platforms):
         click.echo("Error: Number of input files must match number of platforms", err=True)
-        return
+        sys.exit(1)
+
+    try:
+        analyzer_instance = get_analyzer(analyzer)
+        analyzer_instance.validate_config(analyzer_config)
+    except ValueError as e:
+        click.echo(f"Error during analysis: {e}", err=True)
+        sys.exit(1)
+
+    exporter_instance = None
+    if output:
+        try:
+            exporter_instance = get_exporter(exporter)
+            exporter_instance.validate_config(exporter_config)
+        except ValueError as e:
+            click.echo(f"Error during export: {e}", err=True)
+            sys.exit(1)
     
     # Parse all conversations
     all_conversations = []
@@ -235,13 +251,11 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
     
     if not all_conversations:
         click.echo("No conversations found to analyze", err=True)
-        return
+        sys.exit(1)
     
     click.echo(f"\nAnalyzing {len(all_conversations)} conversations...")
     
     # Run analysis
-    analyzer_instance = get_analyzer(analyzer)
-    
     try:
         result = analyzer_instance.analyze(all_conversations, analyzer_config)
         click.echo(f"Found {len(result.unfinished_projects)} unfinished projects")
@@ -269,14 +283,19 @@ def analyze(input_files, platforms, analyzer, output, exporter, obsidian, obsidi
                 output.mkdir(parents=True, exist_ok=True)
         
         try:
-            exporter_instance = get_exporter(exporter)
+            if exporter_instance is None:
+                exporter_instance = get_exporter(exporter)
             output_path = exporter_instance.export(result, output, exporter_config)
             click.echo(f"✓ Exported to {output_path}")
-        except Exception as e:
+        except ValueError as e:
             click.echo(f"Error during export: {e}", err=True)
+            sys.exit(1)
+        except Exception:
+            click.echo("Error during export: the export could not be completed", err=True)
             if verbose:
                 import traceback
                 traceback.print_exc()
+            sys.exit(1)
     else:
         # Print summary
         click.echo("\n=== Analysis Summary ===")
