@@ -10,6 +10,28 @@ from .base import BaseAnalyzer
 from ..models import Conversation, UnfinishedProject, AnalysisResult, Platform
 
 
+def _compile_keywords(keywords: List[str]) -> List["re.Pattern"]:
+    """Compile keyword patterns, reporting invalid ones by index only.
+
+    Keyword patterns can come from a user-supplied config file. Letting
+    ``re.compile`` raise directly leaks the pattern text into the error
+    message (for example ``re.error`` echoes the character after ``(?`` for
+    an unknown extension), which can carry raw terminal control characters
+    into whatever prints the error. Raise a fixed message that names the
+    offending keyword by index and never includes the pattern text, and drop
+    the original exception chain so it cannot resurface in a traceback.
+    """
+    compiled = []
+    for index, pattern in enumerate(keywords):
+        try:
+            compiled.append(re.compile(pattern, re.IGNORECASE))
+        except re.error:
+            raise ValueError(
+                f"Invalid regular expression for keyword at index {index}"
+            ) from None
+    return compiled
+
+
 class UnfinishedProjectsAnalyzer(BaseAnalyzer):
     """Detects unfinished projects in conversations"""
     
@@ -50,7 +72,7 @@ class UnfinishedProjectsAnalyzer(BaseAnalyzer):
         """
         self.keywords = keywords or self.DEFAULT_KEYWORDS
         self.min_confidence = min_confidence
-        self.compiled_patterns = [re.compile(pattern, re.IGNORECASE) for pattern in self.keywords]
+        self.compiled_patterns = _compile_keywords(self.keywords)
     
     def get_name(self) -> str:
         return "unfinished_projects"
@@ -63,12 +85,9 @@ class UnfinishedProjectsAnalyzer(BaseAnalyzer):
             keywords = config['keywords']
             if not isinstance(keywords, list) or not all(isinstance(k, str) for k in keywords):
                 raise ValueError("keywords must be a list of strings")
-            for pattern in keywords:
-                try:
-                    re.compile(pattern, re.IGNORECASE)
-                except (re.error, OverflowError, RecursionError) as e:
-                    shown = pattern if len(pattern) <= 80 else pattern[:80] + '...'
-                    raise ValueError(f"invalid keyword pattern {shown!r}: {e}") from None
+            # Compile through the index-only helper so a bad pattern cannot
+            # echo its own text, including terminal control characters.
+            _compile_keywords(keywords)
             config['keywords'] = list(keywords)
 
         if 'min_confidence' in config:
@@ -92,7 +111,7 @@ class UnfinishedProjectsAnalyzer(BaseAnalyzer):
         # Override settings from config
         if 'keywords' in config:
             self.keywords = config['keywords']
-            self.compiled_patterns = [re.compile(pattern, re.IGNORECASE) for pattern in self.keywords]
+            self.compiled_patterns = _compile_keywords(self.keywords)
         if 'min_confidence' in config:
             self.min_confidence = config['min_confidence']
         
